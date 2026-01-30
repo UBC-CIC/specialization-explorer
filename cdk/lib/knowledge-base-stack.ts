@@ -79,11 +79,27 @@ export class KnowledgeBaseStack extends Stack {
         });
 
         // Add Web Crawler data source
-        new bedrock.WebCrawlerDataSource(this, "WebCrawlerDataSource", {
+        const webCrawlerDataSource = new bedrock.WebCrawlerDataSource(this, "WebCrawlerDataSource", {
             knowledgeBase: this.knowledgeBase,
             sourceUrls: SOURCE_URLS,
             dataSourceName: "web-crawler-source",
             chunkingStrategy: bedrock.ChunkingStrategy.HIERARCHICAL_COHERE,
+        });
+
+        // Automatically trigger a sync (ingestion job) after the data source is created
+        new AwsCustomResource(this, "DataSourceSync", {
+            onCreate: {
+                service: "bedrock-agent",
+                action: "startIngestionJob",
+                parameters: {
+                    knowledgeBaseId: this.knowledgeBase.knowledgeBaseId,
+                    dataSourceId: webCrawlerDataSource.dataSourceId,
+                },
+                physicalResourceId: PhysicalResourceId.of(`${props.stackPrefix}-kb-sync`),
+            },
+            policy: AwsCustomResourcePolicy.fromSdkCalls({
+                resources: AwsCustomResourcePolicy.ANY_RESOURCE,
+            }),
         });
 
         // Outputs
