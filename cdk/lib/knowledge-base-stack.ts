@@ -17,6 +17,9 @@ export interface KnowledgeBaseStackProps extends StackProps {
     stackPrefix: string;
 }
 
+
+
+
 export class KnowledgeBaseStack extends Stack {
     public readonly knowledgeBase: bedrock.VectorKnowledgeBase;
 
