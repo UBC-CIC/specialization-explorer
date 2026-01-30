@@ -7,6 +7,7 @@ import { ApiGatewayStack } from "../lib/api-stack";
 import { DBFlowStack } from "../lib/dbFlow-stack";
 import { AmplifyStack } from "../lib/amplify-stack";
 import { CICDStack } from "../lib/cicd-stack";
+import { KnowledgeBaseStack } from "../lib/knowledge-base-stack";
 
 const app = new cdk.App();
 
@@ -94,8 +95,17 @@ const amplifyStack = new AmplifyStack(app, `${StackPrefix}-Amplify`, apiStack, {
 });
 amplifyStack.addDependency(apiStack);
 
+const knowledgeBaseStack = new KnowledgeBaseStack(
+  app,
+  `${StackPrefix}-KnowledgeBase`,
+  {
+    env,
+    stackPrefix: StackPrefix,
+  }
+);
+
 const stackTags = {
-  Project: "specEx",
+  Project: "OER-AI",
   StackPrefix: StackPrefix,
   Environment: environment || "dev",
   ManagedBy: "CDK",
@@ -109,6 +119,7 @@ const stacks = [
   cicdStack,
   apiStack,
   amplifyStack,
+  knowledgeBaseStack,
 ];
 
 stacks.forEach((stack) => {
