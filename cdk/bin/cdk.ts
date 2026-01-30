@@ -105,7 +105,7 @@ const knowledgeBaseStack = new KnowledgeBaseStack(
 );
 
 const stackTags = {
-  Project: "OER-AI",
+  Project: "specEx",
   StackPrefix: StackPrefix,
   Environment: environment || "dev",
   ManagedBy: "CDK",
