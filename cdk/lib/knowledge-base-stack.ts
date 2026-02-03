@@ -1,5 +1,6 @@
 import { Stack, StackProps, CfnOutput, RemovalPolicy } from "aws-cdk-lib";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 import {
     AwsCustomResource,
@@ -11,9 +12,13 @@ import {
     opensearchserverless as genaiOSS,
 } from "@cdklabs/generative-ai-cdk-constructs";
 
-// Placeholder URL for web crawler - will be updated dynamically by admin
-// The web crawler data source requires at least one URL, so we use a minimal placeholder
-const PLACEHOLDER_URL = ["https://example.com"];
+// Fallback placeholder URL if SSM parameter doesn't exist
+// The web crawler data source requires at least one URL
+const FALLBACK_URL = ["https://example.com"];
+
+// SSM Parameter name for web crawler URLs (stored as JSON array string)
+// Example value in SSM: ["https://url1.com", "https://url2.com"]
+const WEB_CRAWLER_URLS_PARAM = "/spec-ex/knowledge-base/web-crawler-urls";
 
 export interface KnowledgeBaseStackProps extends StackProps {
     stackPrefix: string;
@@ -109,11 +114,25 @@ export class KnowledgeBaseStack extends Stack {
             chunkingStrategy: bedrock.ChunkingStrategy.HIERARCHICAL_COHERE,
         });
 
-        // Add Web Crawler data source - uses placeholder URL initially
-        // Admin will update the URLs and trigger sync via frontend
+        // Read web crawler URLs from SSM Parameter Store
+        // The parameter should contain a JSON array string: ["https://url1.com", "https://url2.com"]
+        let webCrawlerUrls: string[];
+        try {
+            const urlsParam = ssm.StringParameter.valueFromLookup(this, WEB_CRAWLER_URLS_PARAM);
+            // valueFromLookup returns a dummy value during initial synthesis
+            if (urlsParam.includes("dummy-value")) {
+                webCrawlerUrls = FALLBACK_URL;
+            } else {
+                webCrawlerUrls = JSON.parse(urlsParam);
+            }
+        } catch {
+            webCrawlerUrls = FALLBACK_URL;
+        }
+
+        // Add Web Crawler data source - reads URLs from SSM parameter
         this.webCrawlerDataSource = new bedrock.WebCrawlerDataSource(this, "WebCrawlerDataSource", {
             knowledgeBase: this.knowledgeBase,
-            sourceUrls: PLACEHOLDER_URL,
+            sourceUrls: webCrawlerUrls,
             dataSourceName: "web-crawler-source",
             chunkingStrategy: bedrock.ChunkingStrategy.HIERARCHICAL_COHERE,
         });
