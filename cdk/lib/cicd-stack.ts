@@ -155,7 +155,7 @@ export class CICDStack extends cdk.Stack {
             MODULE_NAME: { value: lambda.name },
             LAMBDA_FUNCTION_NAME: { value: lambda.functionName },
             REPO_NAME: { value: repoName },
-            REPOSITORY_URI: { value: ecrRepo.repositoryUri },
+            REPOSITORY_URI: { value: ecrRepo.repositoryUri},
             GITHUB_USERNAME: { value: username },
             GITHUB_REPO: { value: props.githubRepo },
             PATH_FILTER: { value: lambda.sourceDir },

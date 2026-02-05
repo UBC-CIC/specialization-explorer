@@ -16,9 +16,9 @@ import {
 // The web crawler data source requires at least one URL
 const FALLBACK_URL = ["https://example.com"];
 
-// SSM Parameter name for web crawler URLs (stored as JSON array string)
-// Example value in SSM: ["https://url1.com", "https://url2.com"]
-const WEB_CRAWLER_URLS_PARAM = "/spec-ex/knowledge-base/web-crawler-urls";
+// SSM Parameter name for web crawler URLs (stored as comma-separated string)
+// Example value in SSM: https://url1.com,https://url2.com
+const WEB_CRAWLER_URLS_PARAM = "/SpecEx/KnowledgeBase/WebCrawlerUrls";
 
 export interface KnowledgeBaseStackProps extends StackProps {
     stackPrefix: string;
@@ -115,7 +115,7 @@ export class KnowledgeBaseStack extends Stack {
         });
 
         // Read web crawler URLs from SSM Parameter Store
-        // The parameter should contain a JSON array string: ["https://url1.com", "https://url2.com"]
+        // The parameter should contain a comma-separated string: https://url1.com,https://url2.com
         let webCrawlerUrls: string[];
         try {
             const urlsParam = ssm.StringParameter.valueFromLookup(this, WEB_CRAWLER_URLS_PARAM);
@@ -123,7 +123,7 @@ export class KnowledgeBaseStack extends Stack {
             if (urlsParam.includes("dummy-value")) {
                 webCrawlerUrls = FALLBACK_URL;
             } else {
-                webCrawlerUrls = JSON.parse(urlsParam);
+                webCrawlerUrls = urlsParam.split(",").map(url => url.trim()).filter(url => url.length > 0);
             }
         } catch {
             webCrawlerUrls = FALLBACK_URL;
