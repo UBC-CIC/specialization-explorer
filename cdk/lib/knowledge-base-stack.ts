@@ -1,6 +1,8 @@
+import * as cdk from "aws-cdk-lib";
 import { Stack, StackProps, CfnOutput, RemovalPolicy } from "aws-cdk-lib";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as ssm from "aws-cdk-lib/aws-ssm";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { Construct } from "constructs";
 import {
     AwsCustomResource,
@@ -140,6 +142,13 @@ export class KnowledgeBaseStack extends Stack {
         // Note: Sync (ingestion) jobs will be triggered by a Lambda function
         // when admin uploads documents or updates URLs via the frontend
 
+        // Store Knowledge Base ID in AWS Secrets Manager for secure access by other services
+        const knowledgeBaseIdSecret = new secretsmanager.Secret(this, "KnowledgeBaseIdSecret", {
+            secretName: `${props.stackPrefix}/KnowledgeBase/Id`,
+            description: "The ID of the Bedrock Knowledge Base",
+            secretStringValue: cdk.SecretValue.unsafePlainText(this.knowledgeBase.knowledgeBaseId),
+        });
+
         // Outputs
         new CfnOutput(this, "KnowledgeBaseId", {
             value: this.knowledgeBase.knowledgeBaseId,
@@ -169,6 +178,11 @@ export class KnowledgeBaseStack extends Stack {
         new CfnOutput(this, "VectorCollectionArn", {
             value: vectorStore.collectionArn,
             description: "The ARN of the OpenSearch Serverless collection",
+        });
+
+        new CfnOutput(this, "KnowledgeBaseIdSecretArn", {
+            value: knowledgeBaseIdSecret.secretArn,
+            description: "The ARN of the secret containing the Knowledge Base ID",
         });
     }
 }
