@@ -28,7 +28,6 @@ const VECTOR_INDEX_NAME = "bedrock-knowledge-base-default-index";
 const VECTOR_FIELD_NAME = "bedrock-knowledge-base-default-vector";
 const TEXT_FIELD_NAME = "AMAZON_BEDROCK_TEXT_CHUNK";
 const METADATA_FIELD_NAME = "AMAZON_BEDROCK_METADATA";
-
 const TITAN_EMBED_V2_DIMENSIONS = 1024;
 
 export interface KnowledgeBaseStackProps extends StackProps {
@@ -144,56 +143,15 @@ export class KnowledgeBaseStack extends Stack {
       ],
     });
 
-    // The custom resource Lambda needs data-plane API access to the collection endpoint.
+    // IAM permission for AOSS data-plane calls from Lambda (SigV4 signed)
     vectorIndexManagerRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ["aoss:APIAccessAll"],
-        resources: ["*"], // collection ARN not available yet at role creation time; data access policy also restricts principals
+        resources: ["*"], // keep broad here; data access policy is the actual gate
       })
     );
 
-    // Create data access policy for OpenSearch Serverless
-    // Include BOTH Bedrock role and the custom resource Lambda role as principals.
-    const dataAccessPolicy = new opensearchserverless.CfnAccessPolicy(
-      this,
-      "DataAccessPolicy",
-      {
-        name: `${collectionName}-access`,
-        type: "data",
-        policy: JSON.stringify([
-          {
-            Rules: [
-              {
-                ResourceType: "collection",
-                Resource: [`collection/${collectionName}`],
-                Permission: [
-                  "aoss:CreateCollectionItems",
-                  "aoss:DeleteCollectionItems",
-                  "aoss:UpdateCollectionItems",
-                  "aoss:DescribeCollectionItems",
-                ],
-              },
-              {
-                ResourceType: "index",
-                Resource: [`index/${collectionName}/*`],
-                Permission: [
-                  "aoss:CreateIndex",
-                  "aoss:DeleteIndex",
-                  "aoss:UpdateIndex",
-                  "aoss:DescribeIndex",
-                  "aoss:ReadDocument",
-                  "aoss:WriteDocument",
-                ],
-              },
-            ],
-            Principal: [knowledgeBaseRole.roleArn, vectorIndexManagerRole.roleArn],
-          },
-        ]),
-      }
-    );
-
-    // Create OpenSearch Serverless vector collection
     this.vectorCollection = new opensearchserverless.CfnCollection(
       this,
       "VectorCollection",
@@ -204,11 +162,16 @@ export class KnowledgeBaseStack extends Stack {
       }
     );
 
-    this.vectorCollection.addDependency(encryptionPolicy);
-    this.vectorCollection.addDependency(networkPolicy);
-    this.vectorCollection.addDependency(dataAccessPolicy);
+    // Optional scoped IAM allow too (fine to keep)
+    vectorIndexManagerRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["aoss:APIAccessAll"],
+        resources: [this.vectorCollection.attrArn],
+      })
+    );
 
-    // Grant Bedrock role permissions to access OpenSearch (data plane)
+    // Bedrock role IAM permissions
     knowledgeBaseRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -217,7 +180,6 @@ export class KnowledgeBaseStack extends Stack {
       })
     );
 
-    // Grant Bedrock role permission to invoke the embedding model (required for KB ingestion)
     knowledgeBaseRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -226,7 +188,6 @@ export class KnowledgeBaseStack extends Stack {
       })
     );
 
-    // Create S3 bucket for knowledge base documents (CSV files, PDFs, etc.)
     this.knowledgeBaseBucket = new s3.Bucket(this, "KnowledgeBaseBucket", {
       bucketName: `${props.stackPrefix.toLowerCase()}-kb-documents-bucket`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -257,214 +218,95 @@ export class KnowledgeBaseStack extends Stack {
      */
     const vectorIndexManagerFn = new lambda.Function(this, "VectorIndexManagerFn", {
       runtime: lambda.Runtime.PYTHON_3_12,
-      handler: "index.handler",
+      handler: "main.handler",
       role: vectorIndexManagerRole,
       timeout: cdk.Duration.minutes(15),
-      code: lambda.Code.fromInline(`
-import json
-import os
-import time
-import urllib.request
-import urllib.error
-import ssl
-
-import boto3
-from botocore.awsrequest import AWSRequest
-from botocore.auth import SigV4Auth
-from botocore.credentials import Credentials
-from botocore.session import Session
-
-SUCCESS = "SUCCESS"
-FAILED = "FAILED"
-
-def send_cfn_response(event, context, status, reason=None, data=None, physical_resource_id=None):
-    response_url = event.get("ResponseURL")
-    if not response_url:
-        print("No ResponseURL; event:", json.dumps(event))
-        return
-
-    response_body = {
-        "Status": status,
-        "Reason": reason or f"See CloudWatch Logs: {context.log_stream_name}",
-        "PhysicalResourceId": physical_resource_id or context.log_stream_name,
-        "StackId": event["StackId"],
-        "RequestId": event["RequestId"],
-        "LogicalResourceId": event["LogicalResourceId"],
-        "Data": data or {},
-    }
-
-    body = json.dumps(response_body).encode("utf-8")
-    req = urllib.request.Request(
-        response_url,
-        data=body,
-        method="PUT",
-        headers={"content-type": "", "content-length": str(len(body))}
-    )
-    with urllib.request.urlopen(req) as resp:
-        print("CFN response status:", resp.status)
-
-def _normalize_endpoint(endpoint: str) -> str:
-    endpoint = endpoint.strip()
-    if not endpoint.startswith("http://") and not endpoint.startswith("https://"):
-        endpoint = "https://" + endpoint
-    return endpoint.rstrip("/")
-
-def _signed_request(method: str, url: str, region: str, body_obj=None):
-    session = Session()
-    creds = session.get_credentials()
-    frozen = creds.get_frozen_credentials()
-    body = None
-    headers = {"content-type": "application/json"}
-    if body_obj is not None:
-        body = json.dumps(body_obj).encode("utf-8")
-
-    aws_req = AWSRequest(method=method, url=url, data=body, headers=headers)
-    SigV4Auth(Credentials(frozen.access_key, frozen.secret_key, frozen.token), "aoss", region).add_auth(aws_req)
-    prepared = aws_req.prepare()
-
-    req = urllib.request.Request(
-        prepared.url,
-        data=body,
-        method=method,
-        headers=dict(prepared.headers.items()),
-    )
-
-    try:
-        with urllib.request.urlopen(req, context=ssl.create_default_context()) as resp:
-            raw = resp.read().decode("utf-8")
-            return resp.status, raw
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8") if e.fp else ""
-        return e.code, raw
-
-def _wait_for_collection(endpoint: str, region: str, max_attempts=60, sleep_seconds=10):
-    # Try a simple endpoint call until it responds (401/403/404/200 all indicate endpoint is alive enough)
-    # A 5xx/connection error means not ready yet.
-    # OpenSearch Serverless collections can take 5-10 minutes to be fully ready
-    for attempt in range(1, max_attempts + 1):
-        try:
-            code, body = _signed_request("GET", endpoint + "/_cat/indices?v", region)
-            print(f"Collection readiness check attempt {attempt}: code={code}")
-            if code in (200, 401, 403, 404):
-                # Wait a bit more after first success to ensure stability
-                if attempt == 1:
-                    print("Collection responded, waiting 30s for stability...")
-                    time.sleep(30)
-                return
-        except Exception as e:
-            print(f"Readiness attempt {attempt} exception: {e}")
-        time.sleep(sleep_seconds)
-    raise RuntimeError("Timed out waiting for OpenSearch Serverless collection endpoint readiness")
-
-def _create_or_update_index(endpoint: str, index_name: str, region: str, vector_field: str, text_field: str, metadata_field: str, dimensions: int):
-    # Bedrock KB-compatible vector index mapping
-    mapping_body = {
-        "settings": {
-            "index": {
-                "knn": True
-            }
-        },
-        "mappings": {
-            "properties": {
-                vector_field: {
-                    "type": "knn_vector",
-                    "dimension": dimensions,
-                    "method": {
-                        "engine": "faiss",
-                        "name": "hnsw",
-                        "space_type": "l2"
-                    }
-                },
-                text_field: {
-                    "type": "text"
-                },
-                metadata_field: {
-                    "type": "text",
-                    "index": False
-                }
-            }
-        }
-    }
-
-    # Create index (idempotent enough: if exists, update mapping as possible)
-    create_url = f"{endpoint}/{index_name}"
-    code, body = _signed_request("PUT", create_url, region, mapping_body)
-    print("Create index response:", code, body)
-
-    # Accept common "already exists" outcomes
-    if code in (200, 201):
-        return
-    if code == 400 and ("resource_already_exists_exception" in body or "already exists" in body.lower()):
-        # Try a lightweight mapping put to ensure fields exist (won't change incompatible types)
-        map_url = f"{endpoint}/{index_name}/_mapping"
-        code2, body2 = _signed_request("PUT", map_url, region, {"properties": mapping_body["mappings"]["properties"]})
-        print("Update mapping response:", code2, body2)
-        if code2 in (200, 201):
-            return
-        # If mapping already exists and is compatible, some clusters return 400; surface only if clearly incompatible
-        if code2 == 400 and ("mapper_parsing_exception" not in body2 and "illegal_argument_exception" not in body2):
-            return
-        raise RuntimeError(f"Failed to update index mapping: {code2} {body2}")
-    raise RuntimeError(f"Failed to create index: {code} {body}")
-
-def handler(event, context):
-    print("Event:", json.dumps(event))
-    props = event.get("ResourceProperties", {})
-    endpoint = _normalize_endpoint(props["CollectionEndpoint"])
-    region = props["Region"]
-    index_name = props["IndexName"]
-    vector_field = props["VectorField"]
-    text_field = props["TextField"]
-    metadata_field = props["MetadataField"]
-    dimensions = int(props["Dimensions"])
-
-    physical_id = f"{index_name}-vector-index"
-
-    try:
-        request_type = event["RequestType"]
-
-        if request_type == "Delete":
-            # Leave index in place to avoid delete-order issues / accidental data loss.
-            send_cfn_response(event, context, SUCCESS, data={"SkippedDelete": "true"}, physical_resource_id=physical_id)
-            return
-
-        _wait_for_collection(endpoint, region)
-        _create_or_update_index(
-            endpoint=endpoint,
-            index_name=index_name,
-            region=region,
-            vector_field=vector_field,
-            text_field=text_field,
-            metadata_field=metadata_field,
-            dimensions=dimensions,
-        )
-
-        send_cfn_response(event, context, SUCCESS, data={"IndexName": index_name}, physical_resource_id=physical_id)
-    except Exception as e:
-        print("ERROR:", str(e))
-        send_cfn_response(event, context, FAILED, reason=str(e), physical_resource_id=physical_id)
-      `),
+      memorySize: 512,
+      code: lambda.Code.fromAsset("lambda/vectorIndexManager"),
     });
 
+    // Create the Provider - this creates a framework role that wraps the Lambda
     const vectorIndexProvider = new Provider(this, "VectorIndexProvider", {
       onEventHandler: vectorIndexManagerFn,
     });
 
-    const vectorIndexCustomResource = new cdk.CustomResource(this, "VectorIndexCustomResource", {
-      serviceToken: vectorIndexProvider.serviceToken,
-      properties: {
-        CollectionEndpoint: this.vectorCollection.attrCollectionEndpoint,
-        Region: this.region,
-        IndexName: VECTOR_INDEX_NAME,
-        VectorField: VECTOR_FIELD_NAME,
-        TextField: TEXT_FIELD_NAME,
-        MetadataField: METADATA_FIELD_NAME,
-        Dimensions: TITAN_EMBED_V2_DIMENSIONS,
-        // Add a timestamp to force updates when needed
-        Timestamp: Date.now().toString(),
-      },
-    });
+    // Get the Provider's framework role (this is what actually calls the Lambda)
+    const providerRole = vectorIndexProvider.node.findChild('framework-onEvent').node.findChild('ServiceRole') as iam.Role;
+    
+    // Grant the Provider role permissions to access OpenSearch Serverless
+    providerRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["aoss:APIAccessAll"],
+        resources: [this.vectorCollection.attrArn],
+      })
+    );
 
+    /**
+     * OpenSearch Serverless data access policy
+     * CRITICAL: Must use the Provider's framework role, not the Lambda execution role
+     * The Provider framework creates its own role that actually invokes the Lambda
+     */
+    const dataAccessPolicy = new opensearchserverless.CfnAccessPolicy(
+      this,
+      "DataAccessPolicy",
+      {
+        name: `${collectionName}-access`,
+        type: "data",
+        policy: JSON.stringify([
+          {
+            Rules: [
+              {
+                ResourceType: "collection",
+                Resource: [`collection/${collectionName}`],
+                Permission: [
+                  "aoss:DescribeCollectionItems",
+                ],
+              },
+              {
+                ResourceType: "index",
+                Resource: [`index/${collectionName}/*`],
+                Permission: [
+                  "aoss:CreateIndex",
+                  "aoss:DeleteIndex",
+                  "aoss:UpdateIndex",
+                  "aoss:DescribeIndex",
+                  "aoss:ReadDocument",
+                  "aoss:WriteDocument",
+                ],
+              },
+            ],
+            Principal: [
+              knowledgeBaseRole.roleArn,
+              providerRole.roleArn,  // Use Provider's framework role
+            ],
+          },
+        ]),
+      }
+    );
+
+    this.vectorCollection.addDependency(encryptionPolicy);
+    this.vectorCollection.addDependency(networkPolicy);
+    this.vectorCollection.addDependency(dataAccessPolicy);
+
+    const vectorIndexCustomResource = new cdk.CustomResource(
+      this,
+      "VectorIndexCustomResource",
+      {
+        serviceToken: vectorIndexProvider.serviceToken,
+        properties: {
+          CollectionEndpoint: this.vectorCollection.attrCollectionEndpoint,
+          Region: this.region,
+          IndexName: VECTOR_INDEX_NAME,
+          VectorField: VECTOR_FIELD_NAME,
+          TextField: TEXT_FIELD_NAME,
+          MetadataField: METADATA_FIELD_NAME,
+          Dimensions: TITAN_EMBED_V2_DIMENSIONS,
+        },
+      }
+    );
+
+    // Ensure collection + access policy + role exist before custom resource runs
     vectorIndexCustomResource.node.addDependency(this.vectorCollection);
     vectorIndexCustomResource.node.addDependency(dataAccessPolicy);
     vectorIndexCustomResource.node.addDependency(vectorIndexManagerRole);
@@ -472,8 +314,7 @@ def handler(event, context):
     // Create the Bedrock Knowledge Base (depends on collection and index existing)
     this.knowledgeBase = new bedrock.CfnKnowledgeBase(this, "KnowledgeBase", {
       name: `${props.stackPrefix}-KnowledgeBase`,
-      description:
-        "Knowledge base for RAG application with S3 and web-crawled content",
+      description: "Knowledge base for RAG application with S3 and web-crawled content",
       roleArn: knowledgeBaseRole.roleArn,
       knowledgeBaseConfiguration: {
         type: "VECTOR",
@@ -495,13 +336,11 @@ def handler(event, context):
       },
     });
 
-    // KB must wait for both collection AND index creation to complete
-    this.knowledgeBase.node.addDependency(this.vectorCollection);
-    this.knowledgeBase.node.addDependency(vectorIndexCustomResource);
-    
-    // Force CloudFormation to wait by referencing the custom resource output
-    const indexCreationToken = vectorIndexCustomResource.getAtt("IndexName").toString();
-    this.knowledgeBase.addMetadata("IndexCreationToken", indexCreationToken);
+    this.knowledgeBase.addDependency(this.vectorCollection);
+
+    // Strong dependency on underlying CFN custom resource
+    const cfnCustomResource = vectorIndexCustomResource.node.defaultChild as cdk.CfnResource;
+    this.knowledgeBase.addDependency(cfnCustomResource);
 
     // Read web crawler URLs from SSM Parameter Store
     let webCrawlerUrls: string[];
@@ -608,6 +447,16 @@ def handler(event, context):
     new CfnOutput(this, "KnowledgeBaseIdSecretArn", {
       value: knowledgeBaseIdSecret.secretArn,
       description: "The ARN of the secret containing the Knowledge Base ID",
+    });
+
+    new CfnOutput(this, "ProviderRoleArn", {
+      value: providerRole.roleArn,
+      description: "The ARN of the Provider framework role for vector index management",
+    });
+
+    new CfnOutput(this, "DataAccessPolicyName", {
+      value: dataAccessPolicy.name,
+      description: "The name of the OpenSearch Serverless data access policy",
     });
   }
 }
