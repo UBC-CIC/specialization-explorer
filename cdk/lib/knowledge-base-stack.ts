@@ -144,10 +144,15 @@ export class KnowledgeBaseStack extends Stack {
     });
 
     // IAM permission for AOSS data-plane calls from Lambda (SigV4 signed)
+    // CRITICAL: Both APIAccessAll AND DashboardsAccessAll are required
+    // even if not using Dashboards - without both, you get 403 errors
     vectorIndexManagerRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["aoss:APIAccessAll"],
+        actions: [
+          "aoss:APIAccessAll",
+          "aoss:DashboardsAccessAll",  // Required even without Dashboard access
+        ],
         resources: ["*"], // keep broad here; data access policy is the actual gate
       })
     );
@@ -166,7 +171,10 @@ export class KnowledgeBaseStack extends Stack {
     vectorIndexManagerRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["aoss:APIAccessAll"],
+        actions: [
+          "aoss:APIAccessAll",
+          "aoss:DashboardsAccessAll",
+        ],
         resources: [this.vectorCollection.attrArn],
       })
     );
@@ -175,7 +183,10 @@ export class KnowledgeBaseStack extends Stack {
     knowledgeBaseRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["aoss:APIAccessAll"],
+        actions: [
+          "aoss:APIAccessAll",
+          "aoss:DashboardsAccessAll",
+        ],
         resources: [this.vectorCollection.attrArn],
       })
     );
@@ -230,22 +241,10 @@ export class KnowledgeBaseStack extends Stack {
       onEventHandler: vectorIndexManagerFn,
     });
 
-    // Get the Provider's framework role (this is what actually calls the Lambda)
-    const providerRole = vectorIndexProvider.node.findChild('framework-onEvent').node.findChild('ServiceRole') as iam.Role;
-    
-    // Grant the Provider role permissions to access OpenSearch Serverless
-    providerRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["aoss:APIAccessAll"],
-        resources: [this.vectorCollection.attrArn],
-      })
-    );
-
     /**
      * OpenSearch Serverless data access policy
-     * CRITICAL: Must use the Provider's framework role, not the Lambda execution role
-     * The Provider framework creates its own role that actually invokes the Lambda
+     * CRITICAL: Must use the Lambda execution role (vectorIndexManagerRole)
+     * The Provider framework doesn't create a separate role for AOSS access
      */
     const dataAccessPolicy = new opensearchserverless.CfnAccessPolicy(
       this,
@@ -278,7 +277,7 @@ export class KnowledgeBaseStack extends Stack {
             ],
             Principal: [
               knowledgeBaseRole.roleArn,
-              providerRole.roleArn,  // Use Provider's framework role
+              vectorIndexManagerRole.roleArn,  // Use Lambda execution role
             ],
           },
         ]),
@@ -449,9 +448,9 @@ export class KnowledgeBaseStack extends Stack {
       description: "The ARN of the secret containing the Knowledge Base ID",
     });
 
-    new CfnOutput(this, "ProviderRoleArn", {
-      value: providerRole.roleArn,
-      description: "The ARN of the Provider framework role for vector index management",
+    new CfnOutput(this, "VectorIndexManagerRoleArn", {
+      value: vectorIndexManagerRole.roleArn,
+      description: "The ARN of the Lambda execution role for vector index management",
     });
 
     new CfnOutput(this, "DataAccessPolicyName", {
