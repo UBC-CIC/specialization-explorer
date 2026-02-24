@@ -259,7 +259,7 @@ export class KnowledgeBaseStack extends Stack {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "index.handler",
       role: vectorIndexManagerRole,
-      timeout: cdk.Duration.minutes(5),
+      timeout: cdk.Duration.minutes(15),
       code: lambda.Code.fromInline(`
 import json
 import os
@@ -337,14 +337,19 @@ def _signed_request(method: str, url: str, region: str, body_obj=None):
         raw = e.read().decode("utf-8") if e.fp else ""
         return e.code, raw
 
-def _wait_for_collection(endpoint: str, region: str, max_attempts=30, sleep_seconds=10):
+def _wait_for_collection(endpoint: str, region: str, max_attempts=60, sleep_seconds=10):
     # Try a simple endpoint call until it responds (401/403/404/200 all indicate endpoint is alive enough)
     # A 5xx/connection error means not ready yet.
+    # OpenSearch Serverless collections can take 5-10 minutes to be fully ready
     for attempt in range(1, max_attempts + 1):
         try:
             code, body = _signed_request("GET", endpoint + "/_cat/indices?v", region)
             print(f"Collection readiness check attempt {attempt}: code={code}")
             if code in (200, 401, 403, 404):
+                # Wait a bit more after first success to ensure stability
+                if attempt == 1:
+                    print("Collection responded, waiting 30s for stability...")
+                    time.sleep(30)
                 return
         except Exception as e:
             print(f"Readiness attempt {attempt} exception: {e}")
@@ -455,11 +460,14 @@ def handler(event, context):
         TextField: TEXT_FIELD_NAME,
         MetadataField: METADATA_FIELD_NAME,
         Dimensions: TITAN_EMBED_V2_DIMENSIONS,
+        // Add a timestamp to force updates when needed
+        Timestamp: Date.now().toString(),
       },
     });
 
     vectorIndexCustomResource.node.addDependency(this.vectorCollection);
     vectorIndexCustomResource.node.addDependency(dataAccessPolicy);
+    vectorIndexCustomResource.node.addDependency(vectorIndexManagerRole);
 
     // Create the Bedrock Knowledge Base (depends on collection and index existing)
     this.knowledgeBase = new bedrock.CfnKnowledgeBase(this, "KnowledgeBase", {
@@ -487,8 +495,13 @@ def handler(event, context):
       },
     });
 
-    this.knowledgeBase.addDependency(this.vectorCollection);
+    // KB must wait for both collection AND index creation to complete
+    this.knowledgeBase.node.addDependency(this.vectorCollection);
     this.knowledgeBase.node.addDependency(vectorIndexCustomResource);
+    
+    // Force CloudFormation to wait by referencing the custom resource output
+    const indexCreationToken = vectorIndexCustomResource.getAtt("IndexName").toString();
+    this.knowledgeBase.addMetadata("IndexCreationToken", indexCreationToken);
 
     // Read web crawler URLs from SSM Parameter Store
     let webCrawlerUrls: string[];
