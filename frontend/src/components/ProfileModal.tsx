@@ -26,7 +26,11 @@ export function ProfileModal({ onDismiss }: ProfileModalProps) {
             onDismiss();
         } catch (err) {
             console.error("Failed to update profile", err);
-            setError("Failed to save profile. Please try again.");
+            if (err instanceof Error) {
+                setError(err.message);
+            } else {
+                setError("Failed to save profile. Please try again.");
+            }
         } finally {
             setIsSubmitting(false);
         }

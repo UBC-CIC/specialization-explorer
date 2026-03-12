@@ -186,9 +186,17 @@ exports.handler = async (event) => {
           `;
           
           if (existing.length > 0 && existing[0].id !== userId) {
-            // Email belongs to an existing account. "Log them in" to that account.
+            // Email belongs to an existing account.
             const existingUser = existing[0];
+
+            // SECURITY FIX: Prevent claiming of admin accounts by simply knowing their email.
+            if (existingUser.role === 'admin') {
+              response.statusCode = 403;
+              response.body = JSON.stringify({ error: "Cannot merge into an administrator account. Please contact support." });
+              break;
+            }
             
+            // "Log them in" to that account.
             // Try to delete the current temporary user to avoid orphaned rows
             try {
               // Delete child rows safely if needed, or just let DB cascade or fail
