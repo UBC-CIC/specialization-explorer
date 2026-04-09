@@ -1,4 +1,5 @@
 import boto3
+from botocore.config import Config
 import logging
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -52,7 +53,15 @@ Output ONLY the search query. Do not include explanations, preambles, or quotes.
 """
 
     try:
-        bedrock_runtime = boto3.client("bedrock-runtime", region_name=llm_region)
+        bedrock_config = Config(
+            retries={
+                'max_attempts': 3,
+                'mode': 'adaptive'  
+            },
+            connect_timeout= 5,
+            read_timeout= 60
+        )
+        bedrock_runtime = boto3.client("bedrock-runtime", region_name=llm_region, config=bedrock_config)
         response = bedrock_runtime.converse(
             modelId=haiku_model_arn,
             messages=[{"role": "user", "content": [{"text": user_message}]}],
@@ -91,6 +100,10 @@ def _prepare_conversation(
     # 1. Validation
     if not query or not query.strip():
         raise ValueError("Please provide a non-empty question.")
+
+    # Query Length Validation 
+    if len(query) > config.MAX_CHARACTERS_PER_USER_MESSAGE: 
+        raise ValueError(f"Message exceeds the maximum allowed length of {config.MAX_CHARACTERS_PER_USER_MESSAGE} characters.")
 
     # 2. Retrieve History
     raw_history = fetch_recent_messages(db_connection, chat_session_id)
@@ -274,7 +287,15 @@ def get_response(
         }
     }
 
-    bedrock_runtime = boto3.client("bedrock-runtime", region_name=llm_region)
+    bedrock_config = Config(
+        retries={
+            'max_attempts': 3,
+            'mode': 'adaptive'
+        },
+        connect_timeout=5,
+        read_timeout=60
+    )
+    bedrock_runtime = boto3.client("bedrock-runtime", region_name=llm_region, config=bedrock_config)
     
     full_response_text = ""
     answer_text = ""
