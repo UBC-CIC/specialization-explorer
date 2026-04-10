@@ -13,10 +13,8 @@ _CONFIG_LOADED = False
 # ------------------------------------------------------------------
 
 KB_ID = None
-MODEL_ARN = os.getenv(
-    "BEDROCK_MODEL_ID",
-    "us.anthropic.claude-sonnet-4-6"
-)
+SONNET_ARN = None
+HAIKU_ARN = None
 
 REGION = os.getenv("REGION", "ca-central-1")
 LLM_REGION = os.getenv("LLM_REGION", "us-west-2")
@@ -84,15 +82,43 @@ def load_config(db_connection):
     global _CONFIG_LOADED
     global DAILY_TOKEN_LIMIT, MIN_EXCHANGES_BEFORE_SUGGEST, MAX_CHARACTERS_PER_USER_MESSAGE, MAX_CHARACTERS_PER_AI_MESSAGE, TEMPERATURE, TOP_P, SUPPORT_SCORE_THRESHOLD, SCOPE_ALIGNMENT_SCORE_THRESHOLD, GROUNDED_THRESHOLD, PARTIALLY_GROUNDED_THRESHOLD
     global GUARDRAILS, ROLE, CHECKLIST, INSTRUCTIONS, DETECTIVE_PHASE_PROMPT, SUGGESTION_PHASE_PROMPT, INITIAL_PROMPT
-    global KB_ID
+    global KB_ID, SONNET_ARN, HAIKU_ARN
     global SPEC_LIST
     global SPEC_PROMPT
 
     if _CONFIG_LOADED:
         return
 
-    logger.info("Loading system config from DB and Secrets Manager...")
+    logger.info("Loading system config from DB, Secrets Manager, and SSM...")
     
+    if not SONNET_ARN:
+        sonnet_param = os.getenv("SONNET_ARN")
+        if sonnet_param:
+            try:
+                ssm = boto3.client('ssm')
+                response = ssm.get_parameter(Name=sonnet_param)
+                SONNET_ARN = response['Parameter']['Value']
+                logger.info("Successfully loaded SONNET_ARN from SSM.")
+            except Exception as e:
+                logger.error(f"Failed to load SONNET_ARN from SSM: {e}")
+                raise e
+        else:
+            raise ValueError("SONNET_ARN environment variable is not set")
+
+    if not HAIKU_ARN:
+        haiku_param = os.getenv("HAIKU_ARN")
+        if haiku_param:
+            try:
+                ssm = boto3.client('ssm')
+                response = ssm.get_parameter(Name=haiku_param)
+                HAIKU_ARN = response['Parameter']['Value']
+                logger.info("Successfully loaded HAIKU_ARN from SSM.")
+            except Exception as e:
+                logger.error(f"Failed to load HAIKU_ARN from SSM: {e}")
+                raise e
+        else:
+            raise ValueError("HAIKU_ARN environment variable is not set")
+
     # Load Knowledge Base ID from Secrets Manager
     if not KB_ID:
         try:

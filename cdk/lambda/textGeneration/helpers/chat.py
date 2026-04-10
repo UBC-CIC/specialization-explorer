@@ -19,13 +19,15 @@ def _rewrite_query_for_retrieval(
     raw_query: str,
     chat_history: List[Dict[str, Any]],
     llm_region: str,
-    haiku_model_arn: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0" 
+    haiku_model_arn: Optional[str] = None
 ) -> str:
     """
     Uses a fast, low-cost LLM call to rewrite a conversational user query into a
     keyword-rich search query optimized for vector database retrieval.
     Falls back to the raw query on any error.
     """
+    if not haiku_model_arn:
+        haiku_model_arn = config.HAIKU_ARN
     # Build a condensed history string (last few exchanges only)
     history_lines = []
     for msg in chat_history[-6:]:

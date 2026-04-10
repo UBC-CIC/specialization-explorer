@@ -77,9 +77,15 @@ export class ApiGatewayStack extends cdk.Stack {
     const initAllowedOrigins = new cr.AwsCustomResource(this, 'InitAllowedOriginsParamV2', {
       onCreate: crParams,
       onUpdate: crParams,
-      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
-        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/SpecEx/API/AllowedOrigins`],
-      }),
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['ssm:PutParameter'],
+          resources: [
+            `arn:aws:ssm:${this.region}:${this.account}:parameter/SpecEx/API/AllowedOrigins`
+          ],
+        }),
+      ]),
     });
 
     
@@ -952,7 +958,8 @@ export class ApiGatewayStack extends cdk.Stack {
           RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
           REGION: this.region,
           LLM_REGION: "us-west-2",
-          BEDROCK_MODEL_ID: `us.anthropic.claude-sonnet-4-6`
+          HAIKU_ARN: "/SpecEx/LLM/HaikuArn",
+          SONNET_ARN: "/SpecEx/LLM/SonnetArn"
         },
       }
     )
@@ -974,7 +981,11 @@ export class ApiGatewayStack extends cdk.Stack {
     lambdaTextGen.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ["ssm:GetParameter", "ssm:GetParameters"],
-      resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/SpecEx/API/AllowedOrigins`],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/SpecEx/API/AllowedOrigins`,
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/SpecEx/LLM/HaikuArn`,
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/SpecEx/LLM/SonnetArn`
+      ],
     }));
 
 
