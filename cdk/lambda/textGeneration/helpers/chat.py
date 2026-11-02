@@ -9,7 +9,7 @@ from helpers.aws_clients import get_bedrock_client
 
 from helpers.crud import (
     fetch_recent_messages, ensure_session_exists, insert_message, update_last_active_session,
-    DuplicateMessageError
+    message_exists, DuplicateMessageError
 )
 from helpers.logic import get_current_prompt
 from helpers.bedrock import retrieve_documents, format_context_for_prompt
@@ -244,6 +244,7 @@ def get_response(
     
     usage_info = {}
     is_under_limit = True
+    guardrail_invoked = False
     request_started_at = time.monotonic()
 
     # The flag is client-supplied, so it only counts for the fixed intro prompt
@@ -266,10 +267,15 @@ def get_response(
                 "intervention": None
             }
 
+        # Reject a replayed message id before any billable model call
+        if user_message_id and message_exists(db_connection, user_message_id):
+            raise DuplicateMessageError("A message with this id has already been saved")
+
         if not is_intro_message:
             try:
                 # Runs before the query rewrite so later model calls only see redacted text
                 with tracer.provider.in_subsegment("## guardrail"):
+                    guardrail_invoked = True
                     guardrail_result = invoke_guardrail(query, config.REGION)
             except Exception as e:
                 logger.error(f"Guardrail invocation failed: {e}")
@@ -330,6 +336,9 @@ def get_response(
     except DuplicateMessageError:
         # The same request was already received; answering again would save a second reply
         logger.warning("Ignoring a repeated request for a message that is already saved")
+        if guardrail_invoked:
+            # A concurrent replay passed the pre-check and already paid for a guardrail call; meter it
+            record_message_sent(user_id, db_connection)
         return {
             "response": "This message has already been received.",
             "sources_used": [],

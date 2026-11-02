@@ -132,6 +132,21 @@ def insert_message(
         raise RuntimeError("insert_message did not insert a row")
     return message_id
 
+def message_exists(db_connection, message_id: str) -> bool:
+    """
+    Read-only check for an already-saved message id. Lets callers reject a replayed
+    client-supplied id before doing any billable model work.
+    """
+    try:
+        with db_connection.cursor() as cur:
+            cur.execute("SELECT 1 FROM chat_messages WHERE id = %s", (message_id,))
+            return cur.fetchone() is not None
+    except Exception as e:
+        # Clear the aborted transaction so the reused connection stays usable
+        db_connection.rollback()
+        logger.error(f"message_exists failed: {e}")
+        raise
+
 def update_last_active_session(db_connection, chat_session_id: str) -> None:
     try:
         with db_connection.cursor() as cur:
