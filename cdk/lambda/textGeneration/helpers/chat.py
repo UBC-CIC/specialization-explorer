@@ -268,7 +268,7 @@ def get_response(
             }
 
         # Reject a replayed message id before any billable model call
-        if user_message_id and message_exists(db_connection, user_message_id):
+        if user_message_id and message_exists(db_connection, user_message_id, user_id):
             raise DuplicateMessageError("A message with this id has already been saved")
 
         if not is_intro_message:
@@ -337,7 +337,8 @@ def get_response(
         # The same request was already received; answering again would save a second reply
         logger.warning("Ignoring a repeated request for a message that is already saved")
         if guardrail_invoked:
-            # A concurrent replay passed the pre-check and already paid for a guardrail call; meter it
+            # The id slipped past the pre-check (a concurrent replay, or an id saved by another
+            # user) after a guardrail call was already paid for; meter it
             record_message_sent(user_id, db_connection)
         return {
             "response": "This message has already been received.",
