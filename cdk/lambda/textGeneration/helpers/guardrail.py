@@ -1,6 +1,6 @@
-import boto3
 import logging
 from helpers import config
+from helpers.aws_clients import get_bedrock_client
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ def invoke_guardrail(user_message: str, region: str) -> dict:
 
     Raises any boto3 exception to the caller (do not swallow errors here).
     """
-    client = boto3.client('bedrock-runtime', region_name=region)
+    client = get_bedrock_client('bedrock-runtime', region)
 
     response = client.apply_guardrail(
         guardrailIdentifier=config.GUARDRAIL_ID,

@@ -22,6 +22,11 @@ KB_SECRET_NAME = os.environ["KB_SECRET_NAME"]
 REGION = os.environ["REGION"]
 RDS_PROXY_ENDPOINT = os.environ["RDS_PROXY_ENDPOINT"]
 
+# RDS Proxy presents an ACM certificate, so it is verified against the Amazon Trust Services
+# roots rather than the RDS CA bundle. verify-full also checks the host name.
+# https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.howitworks.html
+DB_CA_BUNDLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs", "amazon-root-ca.pem")
+
 # Cached resources
 connection = None
 secret_cache = {}
@@ -55,8 +60,9 @@ def _connect_to_db():
                 'user': db_secret["username"],
                 'password': db_secret["password"],
                 'host': RDS_PROXY_ENDPOINT,
-                'port': db_secret["port"], 
-                'sslmode': 'require'
+                'port': db_secret["port"],
+                'sslmode': 'verify-full',
+                'sslrootcert': DB_CA_BUNDLE,
             }
             connection = psycopg2.connect(**connection_params)
             logger.info("Connected to the database!")

@@ -640,6 +640,18 @@ The selected batch size depends on crawler capacity:
 | Selected crawler has 5,000 or fewer remaining pages   | 1 website        |
 | No available crawler and a new crawler may be created | Up to 5 websites |
 
+### Crawler seed URL limits
+
+Bedrock rejects a web crawler update with more than 100 seed URLs (`MAX_SEED_URLS`), or with seed URLs whose combined length is 3,000 characters or more (`MAX_SEED_URL_CHARS` is 2,999). Before updating the crawler, `_plan_website_batch` checks each queued website against the room left on it:
+
+* Websites that fit are batched as described above.
+* Websites that do not fit are marked `failed` with a "web crawler is full" message, so they do not stay `queued` and block every later sync. Room only shrinks as batches are added, so a website that does not fit now never will on that crawler.
+* If Bedrock still rejects the update with a `ValidationException` (for example a limit the code does not check), the batch is marked `failed` with Bedrock's reason.
+
+Since September 30, 2026, Bedrock no longer allows new Web Crawler connectors on customer-managed knowledge bases ([Bedrock docs](https://docs.aws.amazon.com/bedrock/latest/userguide/webcrawl-data-source-connector.html)). `NEW_WEB_CRAWLERS_SUPPORTED` is therefore `False`: the existing crawler is the only one, and when it is busy the queued websites wait for its current job instead of a new crawler being created.
+
+To make room, remove websites from the crawler, replace several pages with a shorter parent URL (the default scope crawls every page under a seed's path), or upload the pages as Markdown files.
+
 ### Updating an existing crawler
 
 If an available crawler exists, the helper updates that Bedrock data source by appending new seed URLs.
@@ -676,7 +688,7 @@ If the system already has the maximum number of web crawlers, the phase returns:
 After selecting or creating a target crawler, the helper:
 
 1. Starts a Bedrock ingestion job for the web crawler
-2. Creates a 30-minute EventBridge Scheduler schedule
+2. Creates a 10-minute EventBridge Scheduler schedule
 3. Marks the selected website runs as `running`
 4. Stores job metadata on the runs
 
@@ -697,7 +709,7 @@ The schedule name uses this format:
 kb-web-{sync_session_id}-{random_suffix}
 ```
 
-The scheduler invokes the same Lambda every 30 minutes until the job reaches a terminal state.
+The scheduler invokes the same Lambda every 10 minutes until the job reaches a terminal state.
 
 ## Polling and Workflow Continuation
 
@@ -738,6 +750,25 @@ If Bedrock returns `COMPLETE` or `FAILED`, the function:
 4. Commits the database transaction
 5. Deletes the polling schedule
 6. Attempts to continue the workflow
+
+A `COMPLETE` job can still contain documents that failed to ingest (`statistics.numberOfDocumentsFailed`). Bedrock reports reasons for the whole job, often as one JSON array of messages, so each message is matched to the run it names:
+
+* A message naming a run's S3 object (`s3://bucket/key`) marks that run `failed`.
+* A message naming a website's seed URL marks that website run `failed`, since nothing was ingested from it (for example, the seed redirected outside the crawl scope).
+* A message naming a page under a website's seed path (the crawler's default scope) leaves that run `completed` with the reason, shown as **Completed with errors**.
+
+Runs that no message names stay `completed` with no error. Every website job re-crawls all seeds on the crawler, so its messages can name seeds from earlier batches; those are not attached to the current batch. When the messages name at least as many documents as `numberOfDocumentsFailed`, the leftover messages (earlier batches' seeds, or the generic "internal error" Bedrock adds even to clean crawls) are only logged. When some failed documents are not named at all, the leftover messages stay on every unmatched run so the failure is not hidden.
+
+Every terminal poll publishes `FailedDocuments` and `FailedIngestionJobs` to the `<StackPrefix>-Api/KnowledgeBase` CloudWatch namespace through Embedded Metric Format. The `KnowledgeBaseFailedDocumentsAlarm` and `KnowledgeBaseFailedIngestionJobsAlarm` alarms fire when either is at least 1 in a 5-minute period.
+
+### Large files
+
+The S3 data source uses semantic chunking, which rejects a document over 1,000,000 characters. The chunking strategy cannot be changed on an existing data source. At staging time:
+
+* A CSV over 900,000 characters is split into `<name>.partNNN.csv` files. Each part has the header row and its own copy of the metadata file. Only the parts are copied under `uploads/`, and their keys are stored in `data_sources.metadata.s3_part_keys`. `s3_key` keeps the original key so duplicate checks still work.
+* A CSV with a single row over the limit, or a Markdown file over the limit, is rejected with `400`.
+
+Files staged before this check were not split. Re-upload any of them that fail with the size limit.
 
 ### Continuing after S3 completion
 
@@ -855,6 +886,7 @@ The Lambda logs:
 * Schedule deletion failures
 * Workflow continuation failures
 * Website capacity retry behavior
+* Ingestion jobs that failed or finished with failed documents (also published as CloudWatch metrics)
 
 ### Important metadata fields
 
@@ -944,7 +976,7 @@ The scheduler intervals are:
 | Phase   | Polling Interval |
 | ------- | ---------------- |
 | S3      | 5 minutes        |
-| Website | 30 minutes       |
+| Website | 10 minutes       |
 
 ### Why the same Lambda handles API and polling events
 

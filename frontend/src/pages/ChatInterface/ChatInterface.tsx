@@ -111,97 +111,37 @@ export default function AIChatPage() {
     }
   }, [isLoadingHistory, initialMessageLoadTime]);
 
-  const [webSocketToken, setWebSocketToken] = useState<string | null>(null);
-
   // WebSocket configuration
-  const baseWebSocketUrl = useMemo(
-    () => import.meta.env.VITE_WEBSOCKET_URL,
-    []
-  );
-  const webSocketUrl = useMemo(() => {
-    if (!baseWebSocketUrl || !webSocketToken) {
+  const baseWebSocketUrl = import.meta.env.VITE_WEBSOCKET_URL;
+  const apiEndpoint = import.meta.env.VITE_API_ENDPOINT;
+  const isStreamingConfigured = Boolean(baseWebSocketUrl && apiEndpoint);
+
+  useEffect(() => {
+    if (!baseWebSocketUrl) {
+      console.warn("[WebSocket] Base URL not configured");
+    } else if (!apiEndpoint) {
+      console.warn("[WebSocket] API endpoint not configured; skipping token fetch");
+    }
+  }, [baseWebSocketUrl, apiEndpoint]);
+
+  // The WebSocket authorizer checks the token only on $connect, so a token is fetched for each
+  // connection attempt and never kept in React state. Refreshing it while the socket is open
+  // would close the socket and cut off any answer that is still streaming.
+  const getWebSocketUrl = useCallback(async () => {
+    if (!baseWebSocketUrl) {
       return null;
     }
 
+    const token = await fetchUserToken();
     try {
       const url = new URL(baseWebSocketUrl);
-      url.searchParams.set("token", webSocketToken);
+      url.searchParams.set("token", token);
       return url.toString();
     } catch (error) {
       console.error("[WebSocket] Invalid base URL:", error);
       return null;
     }
-  }, [baseWebSocketUrl, webSocketToken]);
-
-  useEffect(() => {
-    if (!baseWebSocketUrl) {
-      console.warn("[WebSocket] Base URL not configured");
-      return;
-    }
-  }, [baseWebSocketUrl, webSocketToken]);
-
-  useEffect(() => {
-    const apiEndpoint = import.meta.env.VITE_API_ENDPOINT;
-    if (!apiEndpoint) {
-      console.warn(
-        "[WebSocket] API endpoint not configured; skipping token fetch"
-      );
-      return;
-    }
-
-    let isActive = true;
-    let refreshTimeoutId: number | undefined;
-    const refreshDelayMs = 14 * 60 * 1000;
-    const retryDelayMs = 30 * 1000;
-
-    async function fetchToken() {
-      if (!isActive) {
-        return;
-      }
-
-      try {
-        const token = await fetchUserToken();
-        if (!isActive) {
-          return;
-        }
-
-        setWebSocketToken(token);
-        scheduleNext(refreshDelayMs);
-      } catch (error) {
-        console.error("[WebSocket] Failed to fetch streaming token:", error);
-        if (!isActive) {
-          return;
-        }
-
-        setWebSocketToken(null);
-        scheduleNext(retryDelayMs);
-      }
-    }
-
-    function scheduleNext(delay: number) {
-      if (!isActive) {
-        return;
-      }
-
-      if (refreshTimeoutId !== undefined) {
-        window.clearTimeout(refreshTimeoutId);
-      }
-
-      refreshTimeoutId = window.setTimeout(
-        fetchToken,
-        delay
-      ) as unknown as number;
-    }
-
-    fetchToken();
-
-    return () => {
-      isActive = false;
-      if (refreshTimeoutId !== undefined) {
-        window.clearTimeout(refreshTimeoutId);
-      }
-    };
-  }, []);
+  }, [baseWebSocketUrl]);
 
   // WebSocket message handlers - memoized to prevent unnecessary reconnections
   const handleWebSocketMessage = useCallback(
@@ -298,7 +238,7 @@ export default function AIChatPage() {
     isConnected,
     connectionState,
     forceReconnect,
-  } = useWebSocket(webSocketUrl, {
+  } = useWebSocket(isStreamingConfigured ? getWebSocketUrl : null, {
     onMessage: handleWebSocketMessage,
     onConnect: () => {
       console.log("[WebSocket] Connected");
@@ -458,15 +398,18 @@ export default function AIChatPage() {
     setIsStreaming(true);
 
     const promptText = WELCOME_PROMPT;
+    // Saved as the id of the intro prompt, so a repeated request is not answered twice
+    const introMessageId = crypto.randomUUID();
 
     // Try WebSocket streaming first, fallback to HTTP if not connected
-    if (isConnected && webSocketUrl) {
+    if (isConnected) {
       console.log("[WebSocket] Starting conversation via WebSocket");
       const success = sendWebSocketMessage({
         action: "generate_text",
         query: promptText,
         chat_session_id: activeChatSessionId,
         is_intro_message: true,
+        message_id: introMessageId,
       });
 
       if (!success) {
@@ -491,6 +434,7 @@ export default function AIChatPage() {
               query: promptText,
               chat_session_id: activeChatSessionId,
               is_intro_message: true,
+              message_id: introMessageId,
             }),
           }
         );
@@ -553,7 +497,7 @@ export default function AIChatPage() {
         setStreamingMessageId(null);
       }
     }
-  }, [activeChatSessionId, userId, isConnected, webSocketUrl, sendWebSocketMessage, forceReconnect, updateChatSessionName]);
+  }, [activeChatSessionId, userId, isConnected, sendWebSocketMessage, forceReconnect, updateChatSessionName]);
 
   // Auto-start conversation if history is empty
   useEffect(() => {
@@ -571,9 +515,10 @@ export default function AIChatPage() {
     // Ensure we have an active chat session
     if (!activeChatSessionId) return;
 
-    // Create user message for AI generation
+    // Create user message for AI generation. The id is sent with the request and saved as the
+    // message's id, so the same request is never saved or answered twice.
     const userMsg: Message = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      id: crypto.randomUUID(),
       sender: "user",
       text,
       time: Date.now(),
@@ -599,12 +544,13 @@ export default function AIChatPage() {
     setMessage("");
 
     // Try WebSocket streaming first, fallback to HTTP if not connected
-    if (isConnected && webSocketUrl) {
+    if (isConnected) {
       
       const success = sendWebSocketMessage({
         action: "generate_text",
         query: text,
         chat_session_id: activeChatSessionId,
+        message_id: userMsg.id,
       });
 
       if (success) {
@@ -647,6 +593,7 @@ export default function AIChatPage() {
           body: JSON.stringify({
             query: text,
             chat_session_id: activeChatSessionId,
+            message_id: userMsg.id,
           }),
         }
       );

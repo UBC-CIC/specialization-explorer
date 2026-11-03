@@ -2,7 +2,6 @@ import * as cdk from "aws-cdk-lib";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as iam from "aws-cdk-lib/aws-iam";
-import * as appsync from "aws-cdk-lib/aws-appsync";
 import { Construct } from "constructs";
 import { Duration } from "aws-cdk-lib";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
@@ -24,6 +23,10 @@ import * as s3n from "aws-cdk-lib/aws-s3-notifications";
 import * as bedrock from "aws-cdk-lib/aws-bedrock";
 import * as cr from "aws-cdk-lib/custom-resources";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as sqs from "aws-cdk-lib/aws-sqs";
+import * as lambdaDestinations from "aws-cdk-lib/aws-lambda-destinations";
+import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as crypto from 'crypto';
 
 function computeConfigHash(config: object): string {
@@ -44,12 +47,10 @@ export class ApiGatewayStack extends cdk.Stack {
   private readonly layerList: { [key: string]: lambda.ILayerVersion };
   public readonly stageARN_APIGW: string;
   public readonly apiGW_basedURL: string;
-  private eventApi: appsync.GraphqlApi;
   public readonly secret: secretsmanager.ISecret;
   public readonly allowedOriginsParamName: string;
   public getEndpointUrl = () => this.api.url;
   public getUserPoolId = () => this.userPool.userPoolId;
-  public getEventApiUrl = () => this.eventApi.graphqlUrl;
   public getUserPoolClientId = () => this.appClient.userPoolClientId;
   public getIdentityPoolId = () => this.identityPool.ref;
   public addLayer = (name: string, layer: lambda.ILayerVersion) =>
@@ -77,7 +78,7 @@ export class ApiGatewayStack extends cdk.Stack {
      */
     const jwt = new lambda.LayerVersion(this, "aws-jwt-verify", {
       code: lambda.Code.fromAsset("./layers/aws-jwt-verify.zip"),
-      compatibleRuntimes: [lambda.Runtime.NODEJS_22_X],
+      compatibleRuntimes: [lambda.Runtime.NODEJS_24_X],
       description: "Contains the aws-jwt-verify library for JS",
     });
 
@@ -87,7 +88,7 @@ export class ApiGatewayStack extends cdk.Stack {
      */
     const postgres = new lambda.LayerVersion(this, "postgres", {
       code: lambda.Code.fromAsset("./layers/postgres.zip"),
-      compatibleRuntimes: [lambda.Runtime.NODEJS_22_X],
+      compatibleRuntimes: [lambda.Runtime.NODEJS_24_X],
       description: "Contains the postgres library for JS",
     });
 
@@ -123,11 +124,14 @@ export class ApiGatewayStack extends cdk.Stack {
           }),
         });
 
-    // powertoolsLayer does not follow the format of layerList
+    // powertoolsLayer does not follow the format of layerList.
+    // Powertools v3 layers are built per Python version and architecture; this one matches the
+    // Python 3.12 x86_64 text generation function. Pinned to a published layer version.
+    // https://docs.aws.amazon.com/powertools/python/latest/getting-started/install/
     const powertoolsLayer = lambda.LayerVersion.fromLayerVersionArn(
       this,
       `${id}-PowertoolsLayer`,
-      `arn:aws:lambda:${this.region}:017000801446:layer:AWSLambdaPowertoolsPythonV2:78`
+      `arn:aws:lambda:${this.region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-x86_64:41`
     );
 
     this.layerList["jwt"] = jwt;
@@ -142,8 +146,15 @@ export class ApiGatewayStack extends cdk.Stack {
         email: true,
       },
       selfSignUpEnabled: false,
-      mfa: cognito.Mfa.OPTIONAL,
+      // Every account in this pool is an administrator, so each sign-in needs an
+      // authenticator app code; administrators enroll on their first sign-in
+      mfa: cognito.Mfa.REQUIRED,
       mfaSecondFactor: { otp: true, sms: false },
+      // Threat protection (Plus plan) blocks sign-ins with compromised passwords and
+      // acts on risky sign-ins; the actions are set in the risk configuration below
+      // https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pool-settings-threat-protection.html
+      featurePlan: cognito.FeaturePlan.PLUS,
+      standardThreatProtectionMode: cognito.StandardThreatProtectionMode.FULL_FUNCTION,
       autoVerify: {
         email: true,
       },
@@ -236,16 +247,38 @@ export class ApiGatewayStack extends cdk.Stack {
         requireSymbols: true,
       },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      // User accounts cannot be backed up with AWS Backup, so the pool is kept if the stack
+      // is deleted, and deletion protection blocks deleting it directly
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
     });
 
-    // Create app client
+    // Create app client. The admin login uses SRP (the Amplify default), so the password
+    // never leaves the browser; refresh tokens stay enabled for session renewal.
     this.appClient = this.userPool.addClient(`${id}-pool`, {
       userPoolClientName: userPoolName,
       authFlows: {
-        userPassword: true,
-        custom: true,
         userSrp: true,
+      },
+      // Sign-in and password reset errors do not reveal whether an account exists
+      preventUserExistenceErrors: true,
+    });
+
+    // Actions for threat protection in full-function mode. Notifications are off because the
+    // pool sends email through Cognito's default sender, which risk notifications cannot use.
+    // https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-cognito-userpoolriskconfigurationattachment.html
+    new cognito.CfnUserPoolRiskConfigurationAttachment(this, `${id}-RiskConfiguration`, {
+      userPoolId: this.userPool.userPoolId,
+      clientId: "ALL",
+      compromisedCredentialsRiskConfiguration: {
+        actions: { eventAction: "BLOCK" },
+      },
+      accountTakeoverRiskConfiguration: {
+        actions: {
+          lowAction: { eventAction: "MFA_IF_CONFIGURED", notify: false },
+          mediumAction: { eventAction: "MFA_REQUIRED", notify: false },
+          highAction: { eventAction: "BLOCK", notify: false },
+        },
       },
     });
 
@@ -328,9 +361,13 @@ export class ApiGatewayStack extends cdk.Stack {
         stageName: "prod",
         tracingEnabled: true,
         description: "Deployment with flashcard support - Nov 18 2025",
-        loggingLevel: apigateway.MethodLoggingLevel.INFO,
+        // Stage-wide defaults. Setting throttling here, instead of under a "/*/*" method option,
+        // keeps them in one method setting; a second "/*/*" entry overrides logging and metrics.
+        loggingLevel: apigateway.MethodLoggingLevel.ERROR,
         dataTraceEnabled: false,
         metricsEnabled: true,
+        throttlingRateLimit: 100,
+        throttlingBurstLimit: 200,
 
         // Origin returned by preflight and gateway error responses; kept in sync with the
         // allow-list by the Amplify stack once the app URL is known
@@ -355,16 +392,13 @@ export class ApiGatewayStack extends cdk.Stack {
         }),
         
         methodOptions: {
-          // Default for all endpoints
-          "/*/*": {
-            throttlingRateLimit: 100,
-            throttlingBurstLimit: 200,
-          },
-
-          // FREQUENT: Public token endpoint
+          // FREQUENT: Public token endpoint. A method override does not inherit the stage
+          // defaults, so logging and metrics are repeated here.
           "/user/publicToken/GET": {
             throttlingRateLimit: 50,
             throttlingBurstLimit: 100,
+            loggingLevel: apigateway.MethodLoggingLevel.ERROR,
+            metricsEnabled: true,
           },
         },
       },
@@ -384,6 +418,26 @@ export class ApiGatewayStack extends cdk.Stack {
         metricName: "specEx-firewall",
       },
       rules: [
+        // Rule 0: AWS Managed IP reputation list (known botnets, scanners and other sources
+        // AWS threat intelligence has flagged). Evaluated first, so these IPs are not counted
+        // against the rate limits of other clients.
+        {
+          name: "AWS-AWSManagedRulesAmazonIpReputationList",
+          priority: 0,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesAmazonIpReputationList",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesAmazonIpReputationList",
+          },
+        },
+
         // Rule 1: AWS Managed Common Rule Set (SQL injection, XSS, etc.)
         // SizeRestrictions_BODY is counted only, since batch admin endpoints send large JSON payloads
         {
@@ -467,7 +521,9 @@ export class ApiGatewayStack extends cdk.Stack {
 
         // Rule 4: Strict limit on account creation (20 req/5min per IP). Each new user gets a fresh
         // message quota, so this bounds how many identities one IP can mint. Matched on method and
-        // path, which a client cannot alter.
+        // path, which a client cannot alter. It is not set lower because a class on a shared
+        // campus network reaches the API from a few NAT addresses; the per-user WebSocket rate
+        // limit and the daily quota bound what each identity can send.
         {
           name: "LimitUserCreation",
           priority: 4,
@@ -537,7 +593,64 @@ export class ApiGatewayStack extends cdk.Stack {
             metricName: "LimitPublicToken",
           },
         },
+
+        // Rule 6: AWS Managed Known Bad Inputs (Log4j/JNDI lookups, Java deserialization,
+        // localhost Host headers and other request patterns tied to known exploits)
+        {
+          name: "AWS-AWSManagedRulesKnownBadInputsRuleSet",
+          priority: 6,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesKnownBadInputsRuleSet",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesKnownBadInputsRuleSet",
+          },
+        },
       ],
+    });
+
+    // WAF logs for investigating blocked and counted requests. Allowed requests are already in
+    // the API access logs, so only requests a rule blocked or counted are kept, which limits
+    // log volume and cost. The name must start with "aws-waf-logs-"; WAF adds the log group
+    // resource policy it needs when logging is turned on.
+    // https://docs.aws.amazon.com/waf/latest/developerguide/logging-cw-logs.html
+    const wafLogGroup = new logs.LogGroup(this, `${id}-WafLogs`, {
+      logGroupName: `aws-waf-logs-${id}`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    new wafv2.CfnLoggingConfiguration(this, `${id}-WafLogging`, {
+      resourceArn: waf.attrArn,
+      // WAF needs the log group ARN without the ":*" suffix that logGroupArn carries
+      logDestinationConfigs: [
+        this.formatArn({
+          service: "logs",
+          resource: "log-group",
+          resourceName: wafLogGroup.logGroupName,
+          arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+        }),
+      ],
+      // Admin requests carry a Cognito token and student requests a signed user token
+      redactedFields: [{ singleHeader: { Name: "authorization" } }],
+      loggingFilter: {
+        DefaultBehavior: "DROP",
+        Filters: [
+          {
+            Behavior: "KEEP",
+            Requirement: "MEETS_ANY",
+            Conditions: ["BLOCK", "COUNT", "EXCLUDED_AS_COUNT", "CAPTCHA", "CHALLENGE"].map(
+              (action) => ({ ActionCondition: { Action: action } })
+            ),
+          },
+        ],
+      },
     });
 
     // Custom Response for WAF Blocks (Returns 429 instead of 403)
@@ -693,20 +806,34 @@ export class ApiGatewayStack extends cdk.Stack {
       return role;
     };
 
-    const lambdaRole = createLambdaRole(`${id}-postgresLambdaRole`);
+    // One role per function, so a public handler cannot use permissions that only the
+    // text generation or knowledge base functions need
 
-    // Grant access to specific secrets instead of '*'
-    db.secretPathUser.grantRead(lambdaRole);
-    this.secret.grantRead(lambdaRole);
+    // REST handlers that only read the database credentials
+    const chatSessionFunctionRole = createLambdaRole(`${id}-chatSessionFunctionRole`);
+    db.secretPathUser.grantRead(chatSessionFunctionRole);
 
-    // Explicitly grant access to the KnowledgeBase ID secret without using a broad wildcard
-    lambdaRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["secretsmanager:GetSecretValue"],
-        resources: [props.knowledgeBaseSecret.secretArn],
-      })
-    );
+    const userFunctionRole = createLambdaRole(`${id}-userFunctionRole`);
+    db.secretPathUser.grantRead(userFunctionRole);
+
+    const systemMessagesFunctionRole = createLambdaRole(`${id}-systemMessagesFunctionRole`);
+    db.secretPathUser.grantRead(systemMessagesFunctionRole);
+
+    // The admin authorizer reads only the Cognito pool and client ids
+    const adminAuthorizerRole = createLambdaRole(`${id}-adminAuthorizerRole`);
+    this.secret.grantRead(adminAuthorizerRole);
+
+    // Text generation reads the database credentials and the knowledge base id;
+    // its Bedrock and WebSocket permissions are added where the function is defined
+    const textGenRole = createLambdaRole(`${id}-textGenRole`);
+    db.secretPathUser.grantRead(textGenRole);
+    props.knowledgeBaseSecret.grantRead(textGenRole);
+
+    // The knowledge base function reads the database credentials and the knowledge base id;
+    // its S3, Bedrock agent and scheduler permissions are added where the function is defined
+    const knowledgeBaseFunctionRole = createLambdaRole(`${id}-knowledgeBaseFunctionRole`);
+    db.secretPathUser.grantRead(knowledgeBaseFunctionRole);
+    props.knowledgeBaseSecret.grantRead(knowledgeBaseFunctionRole);
 
     // Dedicated role for the admin function
     const adminFunctionRole = createLambdaRole(`${id}-adminFunctionRole`);
@@ -797,7 +924,7 @@ export class ApiGatewayStack extends cdk.Stack {
     // Rotate the token signing key on the same cadence as the database credentials.
     // Verifiers accept the previous key only briefly after a rotation (see the authorizers).
     const jwtSecretRotationFunction = new lambda.Function(this, `${id}-JwtSecretRotationFunction`, {
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       handler: "index.handler",
       code: lambda.Code.fromAsset("lambda/jwtSecretRotation"),
       timeout: Duration.seconds(30),
@@ -831,7 +958,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-admin-authorization-api-gateway`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/adminAuthorizerFunction"),
         handler: "adminAuthorizerFunction.handler",
         timeout: Duration.seconds(30),
@@ -843,7 +970,8 @@ export class ApiGatewayStack extends cdk.Stack {
         functionName: `${id}-adminLambdaAuthorizer`,
         memorySize: 512,
         layers: [jwt],
-        role: lambdaRole,
+        role: adminAuthorizerRole,
+        tracing: lambda.Tracing.ACTIVE,
       }
     );
 
@@ -870,7 +998,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-user-authorization-api-gateway`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/authorization"),
         handler: "userAuthorizerFunction.handler",
         timeout: Duration.seconds(30),
@@ -882,6 +1010,7 @@ export class ApiGatewayStack extends cdk.Stack {
           JWT_SECRET: jwtSecret.secretArn,
         },
         functionName: `${id}-userLambdaAuthorizer`,
+        tracing: lambda.Tracing.ACTIVE,
       }
     );
     jwtSecret.grantRead(userAuthFunction);
@@ -908,7 +1037,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-PublicTokenFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         handler: "publicTokenFunction.handler",
         layers: [jwt, postgres],
         reservedConcurrentExecutions: 50,
@@ -920,8 +1049,11 @@ export class ApiGatewayStack extends cdk.Stack {
           RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
         },
         timeout: Duration.seconds(30),
-        memorySize: 128,
+        // Every page load waits on this function; Lambda CPU scales with memory, so 256 MB
+        // shortens cold starts (same size as the user and WebSocket authorizers)
+        memorySize: 256,
         role: jwtLambdaRole,
+        tracing: lambda.Tracing.ACTIVE,
       }
     );
 
@@ -949,7 +1081,7 @@ export class ApiGatewayStack extends cdk.Stack {
     apiGW_publicTokenFunction.overrideLogicalId("PublicTokenFunction");
 
     const preSignupLambda = new lambda.Function(this, `preSignupLambda`, {
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       code: lambda.Code.fromAsset("lambda/authorization"),
       handler: "preSignUp.handler",
       timeout: Duration.seconds(30),
@@ -960,6 +1092,7 @@ export class ApiGatewayStack extends cdk.Stack {
       functionName: `${id}-preSignupLambda`,
       memorySize: 128,
       role: coglambdaRole,
+      tracing: lambda.Tracing.ACTIVE,
     });
 
     preSignupLambda.addEnvironment('ALLOWED_ORIGIN_PARAM', this.allowedOriginsParamName);
@@ -1002,7 +1135,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-addAdminOnSignUp`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/authorization"),
         handler: "addAdminOnSignUp.handler",
         timeout: Duration.seconds(30),
@@ -1015,6 +1148,7 @@ export class ApiGatewayStack extends cdk.Stack {
         memorySize: 128,
         layers: [postgres],
         role: coglambdaRole,
+        tracing: lambda.Tracing.ACTIVE,
       }
     );
     this.userPool.addTrigger(
@@ -1031,8 +1165,11 @@ export class ApiGatewayStack extends cdk.Stack {
         runtime: lambda.Runtime.PYTHON_3_12,
         handler: "main.handler",
         code: lambda.Code.fromAsset("lambda/textGeneration"),
-        timeout: cdk.Duration.seconds(60),
-        role: lambdaRole,
+        // Sized for the slowest WebSocket stream: a full MAX_TOKENS (4000) answer at roughly
+        // 60 tokens/s is about 65 s, plus the guardrail, query rewrite, retrieval and verifier.
+        // HTTP fallback requests use a smaller token cap to finish within the 29 s REST limit.
+        timeout: cdk.Duration.seconds(90),
+        role: textGenRole,
         reservedConcurrentExecutions: 100,
         layers: [psycopgLayer, powertoolsLayer],
         vpc: vpcStack.vpc,
@@ -1049,12 +1186,6 @@ export class ApiGatewayStack extends cdk.Stack {
       }
     )
 
-    // Grand Knowledge Base Secret Access 
-    lambdaTextGen.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["secretsmanager:GetSecretValue"],
-      resources: [props.knowledgeBaseSecret.secretArn]
-    }))
-
     // Grant SSM parameter access for HaikuArn and SonnetArn
       lambdaTextGen.addToRolePolicy(
         new iam.PolicyStatement({
@@ -1070,18 +1201,6 @@ export class ApiGatewayStack extends cdk.Stack {
       // Add SSM parameter names as environment variables
       lambdaTextGen.addEnvironment("HAIKU_ARN", "/SpecEx/LLM/HaikuArn");
       lambdaTextGen.addEnvironment("SONNET_ARN", "/SpecEx/LLM/SonnetArn");
-
-
-    lambdaTextGen.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions:["ssm:GetParameter", "ssm:GetParameters"],
-        resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter/SpecEx/LLM/HaikuArn`,
-          `arn:aws:ssm:${this.region}:${this.account}:parameter/SpecEx/LLM/SonnetArn`,
-        ],
-      })
-    );
 
     // --- Bedrock Input Guardrail ---
     const guardrailConfig = {
@@ -1210,12 +1329,6 @@ export class ApiGatewayStack extends cdk.Stack {
         "bedrock:Retrieve", // Add Retrieve permission for Knowledge Base
       ],
       resources: [
-        `arn:aws:bedrock:${this.region}::foundation-model/meta.llama3-70b-instruct-v1:0`,
-        `arn:aws:bedrock:us-east-1::foundation-model/cohere.embed-v4:0`,
-        // Mistral Large
-        `arn:aws:bedrock:${this.region}::foundation-model/mistral.mistral-large-2402-v1:0`,
-        // Claude Sonnet 3 (Direct Foundation Models)
-        `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0`,
         // Claude Sonnet 5.5
         `arn:aws:bedrock:*:*:inference-profile/us.anthropic.claude-sonnet-5-5`,
         `arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5-5`,
@@ -1237,8 +1350,6 @@ export class ApiGatewayStack extends cdk.Stack {
     });
     lambdaTextGen.addToRolePolicy(textGenBedrockPolicyStatement);
 
-    // lambdaRole already has read access to db.secretPathUser through the stack-wide policy
-
 
 
     // --- Knowledge Base Lambda Function ---
@@ -1248,7 +1359,7 @@ export class ApiGatewayStack extends cdk.Stack {
       handler: "main.handler",
       code: lambda.Code.fromAsset("lambda/knowledgeBase"),
       timeout: Duration.seconds(300),
-      role: lambdaRole,
+      role: knowledgeBaseFunctionRole,
       layers: [psycopgLayer],
       memorySize: 512,
       vpc: vpcStack.vpc,
@@ -1262,6 +1373,39 @@ export class ApiGatewayStack extends cdk.Stack {
         KNOWLEDGE_BASE_BUCKET_NAME: props.knowledgeBaseBucket.bucketName,
         KB_SECRET_NAME: props.knowledgeBaseSecret.secretName
       },
+    });
+
+    // Ingestion polling publishes failed document and job counts to this namespace (Embedded
+    // Metric Format). A Bedrock job can finish COMPLETE with failed documents, so both are alarmed.
+    const knowledgeBaseMetricsNamespace = `${id}/KnowledgeBase`;
+    lambdaKnowledgeBase.addEnvironment('METRICS_NAMESPACE', knowledgeBaseMetricsNamespace);
+
+    new cloudwatch.Alarm(this, 'KnowledgeBaseFailedDocumentsAlarm', {
+      metric: new cloudwatch.Metric({
+        namespace: knowledgeBaseMetricsNamespace,
+        metricName: 'FailedDocuments',
+        period: Duration.minutes(5),
+        statistic: cloudwatch.Stats.SUM,
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'Knowledge base ingestion finished with documents that failed to ingest',
+    });
+
+    new cloudwatch.Alarm(this, 'KnowledgeBaseFailedIngestionJobsAlarm', {
+      metric: new cloudwatch.Metric({
+        namespace: knowledgeBaseMetricsNamespace,
+        metricName: 'FailedIngestionJobs',
+        period: Duration.minutes(5),
+        statistic: cloudwatch.Stats.SUM,
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'A knowledge base ingestion job failed',
     });
 
     lambdaKnowledgeBase.addEnvironment('ALLOWED_ORIGIN_PARAM', this.allowedOriginsParamName);
@@ -1280,8 +1424,6 @@ export class ApiGatewayStack extends cdk.Stack {
       action: "lambda:InvokeFunction",
       sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/*/*/admin/*`,
     });
-
-    // lambdaRole already has read access to db.secretPathUser through the stack-wide policy
 
     // Tightly scopes S3 permissions to only the target knowledge base bucket
     props.knowledgeBaseBucket.grantReadWrite(lambdaKnowledgeBase);
@@ -1304,9 +1446,6 @@ export class ApiGatewayStack extends cdk.Stack {
         ],
       })
     );
-
-    // Grant access to read Knowledge Base ID
-    props.knowledgeBaseSecret.grantRead(lambdaKnowledgeBase);
 
     lambdaKnowledgeBase.addToRolePolicy(
       new iam.PolicyStatement({
@@ -1355,7 +1494,7 @@ export class ApiGatewayStack extends cdk.Stack {
     );
 
     const lambdaUserFunction = new lambda.Function(this, `${id}-userFunction`, {
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       code: lambda.Code.fromAsset("lambda"),
       handler: "handlers/userHandler.handler",
       timeout: Duration.seconds(30),
@@ -1369,7 +1508,7 @@ export class ApiGatewayStack extends cdk.Stack {
       memorySize: 512,
       reservedConcurrentExecutions: 50,
       layers: [postgres],
-      role: lambdaRole,
+      role: userFunctionRole,
       tracing: lambda.Tracing.ACTIVE,
     });
 
@@ -1387,13 +1526,6 @@ export class ApiGatewayStack extends cdk.Stack {
       sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/*/*/member*`,
     });
 
-    //Allows Invoking Functions Easily for Testing Purposes
-    lambdaUserFunction.addPermission("AllowTestInvoke", {
-      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
-      action: "lambda:InvokeFunction",
-      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/test-invoke-stage/*/*`,
-    });
-
     const cfnLambda_user = lambdaUserFunction.node
       .defaultChild as lambda.CfnFunction;
     cfnLambda_user.overrideLogicalId("userFunction");
@@ -1405,7 +1537,7 @@ export class ApiGatewayStack extends cdk.Stack {
     });
 
     const lambdaSystemMessagesFunction = new lambda.Function(this, `${id}-systemMessagesFunction`, {
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       code: lambda.Code.fromAsset("lambda"),
       handler: "handlers/systemMessagesHandler.handler",
       timeout: Duration.seconds(30),
@@ -1418,7 +1550,7 @@ export class ApiGatewayStack extends cdk.Stack {
       functionName: `${id}-systemMessagesFunction`,
       memorySize: 512,
       layers: [postgres],
-      role: lambdaRole,
+      role: systemMessagesFunctionRole,
       tracing: lambda.Tracing.ACTIVE,
     });
 
@@ -1436,12 +1568,6 @@ export class ApiGatewayStack extends cdk.Stack {
       sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/*/*/member*`,
     });
 
-    lambdaSystemMessagesFunction.addPermission("AllowTestInvoke", {
-      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
-      action: "lambda:InvokeFunction",
-      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/test-invoke-stage/*/*`,
-    });
-
     const cfnLambda_systemMessages = lambdaSystemMessagesFunction.node
       .defaultChild as lambda.CfnFunction;
     cfnLambda_systemMessages.overrideLogicalId("systemMessagesFunction");
@@ -1457,7 +1583,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-chatSessionFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda"),
         handler: "handlers/chatSessionHandler.handler",
         timeout: Duration.seconds(30),
@@ -1469,7 +1595,7 @@ export class ApiGatewayStack extends cdk.Stack {
         functionName: `${id}-chatSessionFunction`,
         memorySize: 512,
         layers: [postgres],
-        role: lambdaRole,
+        role: chatSessionFunctionRole,
         tracing: lambda.Tracing.ACTIVE,
       }
     );
@@ -1497,7 +1623,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-adminFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda"),
         handler: "handlers/adminHandler.handler",
         timeout: Duration.seconds(30),
@@ -1529,13 +1655,6 @@ export class ApiGatewayStack extends cdk.Stack {
     }));
 
 
-    //allows invoking admin Lambda from API Gateway test stage for easier testing
-    lambdaAdminFunction.addPermission("AllowTestInvoke", {
-      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
-      action: "lambda:InvokeFunction",
-      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/test-invoke-stage/*/*`,
-    });
-
     const cfnLambda_admin = lambdaAdminFunction.node
       .defaultChild as lambda.CfnFunction;
     cfnLambda_admin.overrideLogicalId("adminFunction");
@@ -1552,7 +1671,7 @@ export class ApiGatewayStack extends cdk.Stack {
     // Connect Lambda
     const connectFunction = new lambda.Function(this, `${id}-ConnectFunction`, {
       functionName: `${id}-ConnectFunction`,
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       handler: "connect.handler",
       code: lambda.Code.fromAsset("lambda/websocket"),
       timeout: cdk.Duration.seconds(30),
@@ -1564,7 +1683,7 @@ export class ApiGatewayStack extends cdk.Stack {
     // $connect authorizer: verifies the user-bound token and passes the user id to every route
     const wsAuthorizerFunction = new lambda.Function(this, `${id}-WebSocketAuthorizerFunction`, {
       functionName: `${id}-WebSocketAuthorizerFunction`,
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       handler: "authorizer.handler",
       code: lambda.Code.fromAsset("lambda/websocket"),
       timeout: cdk.Duration.seconds(30),
@@ -1601,7 +1720,7 @@ export class ApiGatewayStack extends cdk.Stack {
       `${id}-DisconnectFunction`,
       {
         functionName: `${id}-DisconnectFunction`,
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         handler: "disconnect.handler",
         code: lambda.Code.fromAsset("lambda/websocket"),
         timeout: cdk.Duration.seconds(30),
@@ -1612,7 +1731,7 @@ export class ApiGatewayStack extends cdk.Stack {
 
     // Default route Lambda for handling messages
     const defaultFunction = new lambda.Function(this, `${id}-DefaultFunction`, {
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       handler: "default.handler",
       code: lambda.Code.fromAsset("lambda/websocket"),
       timeout: cdk.Duration.seconds(30),
@@ -1633,6 +1752,22 @@ export class ApiGatewayStack extends cdk.Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       alarmDescription: 'WebSocket Default Lambda approaching concurrency limit',
     });
+
+    // Per-user message rate for the WebSocket API, which WAF cannot be associated with.
+    // Each item is one user's counter for one 60-second window and expires through TTL,
+    // so the table holds no history; it has no point-in-time recovery and is not retained.
+    const wsRateLimitTable = new dynamodb.TableV2(this, `${id}-WebSocketRateLimits`, {
+      partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
+      billing: dynamodb.Billing.onDemand(),
+      timeToLiveAttribute: "expiresAt",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    wsRateLimitTable.grant(defaultFunction, "dynamodb:UpdateItem");
+    defaultFunction.addEnvironment("RATE_LIMIT_TABLE_NAME", wsRateLimitTable.tableName);
+    // A reply streams for 10 to 60 seconds, so 10 messages a minute is well above normal use.
+    // The chat page sends a warm-up every 5 minutes.
+    defaultFunction.addEnvironment("MESSAGE_RATE_LIMIT_PER_MINUTE", "10");
+    defaultFunction.addEnvironment("WARMUP_RATE_LIMIT_PER_MINUTE", "2");
 
     defaultFunction.addEnvironment('ALLOWED_ORIGIN_PARAM', this.allowedOriginsParamName);
     defaultFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -1665,6 +1800,88 @@ export class ApiGatewayStack extends cdk.Stack {
 
     // Grant the default function permission to invoke the text generation function
     lambdaTextGen.grantInvoke(defaultFunction);
+
+    // --- Async text generation failure path ---
+    // The default route invokes text generation asynchronously. A retry would replay a request
+    // whose user message is already saved and whose answer was partly streamed, and a throttled
+    // event that arrives minutes later has no client waiting for it. So failed or expired events
+    // are not retried; they go to a queue, and a handler tells the client the request failed.
+    // https://docs.aws.amazon.com/lambda/latest/dg/invocation-async-retain-records.html
+    const textGenFailureDlq = new sqs.Queue(this, `${id}-TextGenFailureDLQ`, {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: Duration.days(4),
+    });
+
+    // Records include the user's query, so they are kept only briefly
+    const textGenFailureQueue = new sqs.Queue(this, `${id}-TextGenFailureQueue`, {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: Duration.days(1),
+      // AWS recommends at least six times the consumer function timeout
+      visibilityTimeout: Duration.seconds(60),
+      deadLetterQueue: { queue: textGenFailureDlq, maxReceiveCount: 3 },
+    });
+
+    lambdaTextGen.configureAsyncInvoke({
+      retryAttempts: 0,
+      maxEventAge: Duration.minutes(2),
+      onFailure: new lambdaDestinations.SqsDestination(textGenFailureQueue),
+    });
+
+    const textGenFailureFunction = new lambda.Function(this, `${id}-TextGenFailureFunction`, {
+      functionName: `${id}-TextGenFailureFunction`,
+      runtime: lambda.Runtime.NODEJS_24_X,
+      handler: "asyncFailure.handler",
+      code: lambda.Code.fromAsset("lambda/websocket"),
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 128,
+      reservedConcurrentExecutions: 10,
+      tracing: lambda.Tracing.ACTIVE,
+    });
+    textGenFailureFunction.addToRolePolicy(wsPolicy);
+    textGenFailureFunction.addEventSource(
+      new lambdaEventSources.SqsEventSource(textGenFailureQueue, {
+        batchSize: 10,
+        reportBatchItemFailures: true,
+      })
+    );
+
+    new cloudwatch.Alarm(this, 'TextGenAsyncFailureAlarm', {
+      metric: textGenFailureQueue.metricNumberOfMessagesSent({
+        period: Duration.minutes(5),
+        statistic: cloudwatch.Stats.SUM,
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'Asynchronous text generation requests failed or expired before running',
+    });
+
+    new cloudwatch.Alarm(this, 'TextGenFailureDestinationAlarm', {
+      metric: lambdaTextGen.metric('DestinationDeliveryFailures', {
+        period: Duration.minutes(5),
+        statistic: cloudwatch.Stats.SUM,
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'Failed text generation events could not be delivered to the failure queue',
+    });
+
+    new cloudwatch.Alarm(this, 'TextGenFailureDlqAlarm', {
+      metric: textGenFailureDlq.metricApproximateNumberOfMessagesVisible({
+        period: Duration.minutes(5),
+        statistic: cloudwatch.Stats.MAXIMUM,
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'The text generation failure handler could not process failure records',
+    });
 
     // Routes
     new apigatewayv2.WebSocketRoute(this, `${id}-ConnectRoute`, {
@@ -1742,31 +1959,18 @@ export class ApiGatewayStack extends cdk.Stack {
       "WEBSOCKET_API_ENDPOINT",
       `${this.webSocketApi.apiEndpoint}/${this.wsStage.stageName}`
     );
+    // The failure handler posts to this endpoint rather than one taken from the failure record
+    textGenFailureFunction.addEnvironment(
+      "WEBSOCKET_API_ENDPOINT",
+      `${this.webSocketApi.apiEndpoint}/${this.wsStage.stageName}`
+    );
+    // The default route posts rate limit errors to this endpoint
+    defaultFunction.addEnvironment(
+      "WEBSOCKET_API_ENDPOINT",
+      `${this.webSocketApi.apiEndpoint}/${this.wsStage.stageName}`
+    );
 
-    // Explicit retention for function logs, which otherwise never expire
-    [
-      adminAuthorizationFunction,
-      userAuthFunction,
-      publicTokenLambda,
-      preSignupLambda,
-      AutoSignupLambda,
-      lambdaTextGen,
-      lambdaKnowledgeBase,
-      lambdaUserFunction,
-      lambdaSystemMessagesFunction,
-      lambdaChatSessionFunction,
-      lambdaAdminFunction,
-      jwtSecretRotationFunction,
-      connectFunction,
-      wsAuthorizerFunction,
-      disconnectFunction,
-      defaultFunction,
-    ].forEach((fn, index) => {
-      new logs.LogRetention(this, `${id}-LambdaLogRetention${index}`, {
-        logGroupName: `/aws/lambda/${fn.functionName}`,
-        retention: logs.RetentionDays.ONE_MONTH,
-      });
-    });
+    // Function log retention is applied to every stack in bin/cdk.ts (lib/log-retention.ts)
 
     // Add WebSocket URL as stack output
     new cdk.CfnOutput(this, "WebSocketUrl", {

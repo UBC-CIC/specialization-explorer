@@ -1506,6 +1506,10 @@ paths:
               properties:
                 query:
                   type: string
+                message_id:
+                  type: string
+                  format: uuid
+                  description: Client-generated id for the user message. A request that repeats an id that is already saved is rejected with 409.
       responses:
         "200":
           description: Generated text response
@@ -1524,6 +1528,8 @@ paths:
           description: Invalid request
         "404":
           description: Chat session not found
+        "409":
+          description: A message with this message_id has already been received
         "500":
           description: Internal Server Error
       x-amazon-apigateway-integration:
@@ -2014,56 +2020,6 @@ paths:
       x-amazon-apigateway-integration:
         uri:
           Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${chatSessionFunction.Arn}/invocations
-        passthroughBehavior: "when_no_match"
-        httpMethod: POST
-        type: aws_proxy
-
-  /user/exampleEndpoint:
-    options:
-      summary: CORS support
-      description: Enable CORS by returning correct headers
-      responses:
-        200:
-          $ref: "#/components/responses/Success"
-      x-amazon-apigateway-integration:
-        type: mock
-        requestTemplates:
-          application/json: |
-            {
-              "statusCode" : 200
-            }
-        responses:
-          default:
-            statusCode: "200"
-            responseParameters:
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
-              method.response.header.Access-Control-Allow-Origin: stageVariables.allowedOrigin
-            responseTemplates:
-              application/json: |
-                {}
-    get:
-      tags:
-        - User
-      summary: Example endpoint for testing user functionality
-      operationId: get_example_endpoint
-      security:
-        - userAuthorizer: []
-      responses:
-        "200":
-          description: Example endpoint response
-          content:
-            application/json:
-              schema:
-                type: string
-                example: "Example endpoint invoked"
-        "401":
-          description: Unauthorized
-        "500":
-          description: Internal Server Error
-      x-amazon-apigateway-integration:
-        uri:
-          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${userFunction.Arn}/invocations
         passthroughBehavior: "when_no_match"
         httpMethod: POST
         type: aws_proxy

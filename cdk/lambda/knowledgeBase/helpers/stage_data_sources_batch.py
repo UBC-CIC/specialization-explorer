@@ -5,7 +5,7 @@ from helpers.stage_data_sources import (
     _validate_file_pair,
     _assert_s3_object_exists,
     _approved_key_for,
-    _promote_upload,
+    _promote_file_pair,
     _discard_promoted,
     InvalidUploadError,
     _existing_file_row_id,
@@ -102,35 +102,63 @@ def stage_data_sources_batch(event, body, connection, acting_user):
 
             # Verify files exist in S3
             try:
-                _assert_s3_object_exists(primary_s3_bucket, primary_s3_key)
+                primary_size = _assert_s3_object_exists(primary_s3_bucket, primary_s3_key)
                 _assert_s3_object_exists(metadata_s3_bucket, metadata_s3_key)
             except Exception as e:
                 logger.error("S3 object not found for item %d: %s", i, e)
                 errors.append({"index": i, "file": primary_file_name, "error": "File not found in S3"})
                 continue
 
-            _promote_upload(primary_s3_key, primary_approved_key)
-            promoted_keys.append(primary_approved_key)
-            _promote_upload(metadata_s3_key, metadata_approved_key)
-            promoted_keys.append(metadata_approved_key)
+            item_promoted_keys = []
+            try:
+                part_keys = _promote_file_pair(
+                    source_type=source_type,
+                    primary_key=primary_s3_key,
+                    primary_approved_key=primary_approved_key,
+                    primary_size=primary_size,
+                    metadata_key=metadata_s3_key,
+                    metadata_approved_key=metadata_approved_key,
+                    promoted_keys=item_promoted_keys,
+                )
+            except InvalidUploadError as e:
+                _discard_promoted(item_promoted_keys)
+                errors.append({"index": i, "file": primary_file_name, "error": str(e)})
+                continue
+            finally:
+                promoted_keys.extend(item_promoted_keys)
             primary_s3_key, metadata_s3_key = primary_approved_key, metadata_approved_key
 
             primary_label = source_type  # "csv" or "markdown"
+
+            primary_metadata = {
+                "source": "staged_s3_file",
+                "action": "staged_for_future_sync",
+                "s3_bucket": primary_s3_bucket,
+                "s3_key": primary_s3_key,
+                "companion_file_name": metadata_file_name,
+                "companion_s3_bucket": metadata_s3_bucket,
+                "companion_s3_key": metadata_s3_key,
+            }
+            json_metadata = {
+                "source": "staged_s3_file",
+                "action": "staged_for_future_sync",
+                "s3_bucket": metadata_s3_bucket,
+                "s3_key": metadata_s3_key,
+                "companion_file_name": primary_file_name,
+                "companion_s3_bucket": primary_s3_bucket,
+                "companion_s3_key": primary_s3_key,
+            }
+            # s3_key stays the logical key used for duplicate checks; ingestion reads the parts
+            if part_keys:
+                primary_metadata["s3_part_keys"] = part_keys
+                json_metadata["s3_part_keys"] = [f"{k}.metadata.json" for k in part_keys]
 
             primary_ds_id = _insert_data_source_row(
                 connection,
                 name=primary_file_name,
                 data_source_type=source_type,
                 created_by_user_id=created_by_user_id,
-                metadata={
-                    "source": "staged_s3_file",
-                    "action": "staged_for_future_sync",
-                    "s3_bucket": primary_s3_bucket,
-                    "s3_key": primary_s3_key,
-                    "companion_file_name": metadata_file_name,
-                    "companion_s3_bucket": metadata_s3_bucket,
-                    "companion_s3_key": metadata_s3_key,
-                },
+                metadata=primary_metadata,
             )
 
             json_ds_id = _insert_data_source_row(
@@ -138,15 +166,7 @@ def stage_data_sources_batch(event, body, connection, acting_user):
                 name=metadata_file_name,
                 data_source_type="json",
                 created_by_user_id=created_by_user_id,
-                metadata={
-                    "source": "staged_s3_file",
-                    "action": "staged_for_future_sync",
-                    "s3_bucket": metadata_s3_bucket,
-                    "s3_key": metadata_s3_key,
-                    "companion_file_name": primary_file_name,
-                    "companion_s3_bucket": primary_s3_bucket,
-                    "companion_s3_key": primary_s3_key,
-                },
+                metadata=json_metadata,
             )
 
             _insert_ingestion_run_row(

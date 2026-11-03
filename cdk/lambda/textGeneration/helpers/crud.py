@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+
+class DuplicateMessageError(Exception):
+    """Raised when a message with the client-supplied id has already been saved."""
+
+
 def get_exchange_count(chat_session_id: str, db_connection) -> int:
     """
     Counts the number of exchanges (User + AI pairs) in a session.
@@ -27,20 +32,18 @@ def fetch_recent_messages(
     chat_session_id: str,
 ) -> List[Dict[str, Any]]:    
     """
-    Fetch recent messages for a chat session (oldest->newest).
+    Fetch the 20 most recent messages for a chat session, returned oldest->newest.
+    Only sender and content are needed to build the model context.
     """
     with db_connection.cursor() as cur:
-        # Note: Added 'sources' (LIMIT 20 is small enough to include full json) or keep it lightweight
-        # Previous implementation kept it lightweight. But chat.py retrieves sources?
-        # Actually fetch_recent_messages is used for context. Context needs content only?
-        # Check chat.py usage. It uses msg['sender'] and msg['content'].
-        # So current query is fine.
+        # Newest first so LIMIT keeps the latest turns. The order matches the
+        # idx_chat_messages_session_created_at index (chat_session_id, created_at, id).
         cur.execute(
             """
             SELECT sender, content, created_at
             FROM chat_messages
             WHERE chat_session_id = %s
-            ORDER BY created_at ASC
+            ORDER BY created_at DESC, id DESC
             LIMIT %s
             """,
             (chat_session_id, 20)
@@ -48,7 +51,7 @@ def fetch_recent_messages(
         rows = cur.fetchall()
 
     messages = []
-    for sender, content, created_at in rows:
+    for sender, content, created_at in reversed(rows):
         messages.append({
             "sender": sender,          # 'user' or 'AI'
             "content": content,
@@ -96,9 +99,16 @@ def insert_message(
     sender: str,
     content: str,
     sources: Optional[List[Dict[str, Any]]] = None,
-    warning: Optional[str] = None
+    warning: Optional[str] = None,
+    message_id: Optional[str] = None,
 ) -> str:
-    message_id = str(uuid.uuid4())
+    """
+    Inserts a chat message. When the caller supplies message_id (a client-generated UUID),
+    the insert is idempotent: if a row with that id already exists, nothing is written and
+    DuplicateMessageError is raised so the request is not processed a second time.
+    """
+    client_supplied_id = message_id is not None
+    message_id = message_id or str(uuid.uuid4())
     sources_json = json.dumps(sources or [])
     try:
         with db_connection.cursor() as cur:
@@ -106,13 +116,45 @@ def insert_message(
                 """
                 INSERT INTO chat_messages (id, chat_session_id, sender, content, sources, warning, created_at)
                 VALUES (%s, %s, %s, %s, %s::jsonb, %s, NOW())
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id
                 """,
                 (message_id, chat_session_id, sender, content, sources_json, warning)
             )
+            inserted = cur.fetchone()
     except Exception as e:
         logger.error(f"insert_message failed: {e}")
         raise e
+    if inserted is None:
+        if client_supplied_id:
+            raise DuplicateMessageError("A message with this id has already been saved")
+        # A server-generated UUID collided with an existing row; treat it as a failed insert
+        raise RuntimeError("insert_message did not insert a row")
     return message_id
+
+def message_exists(db_connection, message_id: str, user_id: str) -> bool:
+    """
+    Read-only check for a message id the caller already saved in one of their own sessions.
+    Lets callers reject a replayed client-supplied id before doing any billable model work.
+    Scoped to the caller so it cannot reveal whether an id exists in another user's chats.
+    """
+    try:
+        with db_connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM chat_messages m
+                JOIN chat_sessions s ON s.id = m.chat_session_id
+                WHERE m.id = %s AND s.user_id = %s
+                """,
+                (message_id, user_id)
+            )
+            return cur.fetchone() is not None
+    except Exception as e:
+        # Clear the aborted transaction so the reused connection stays usable
+        db_connection.rollback()
+        logger.error(f"message_exists failed: {e}")
+        raise
 
 def update_last_active_session(db_connection, chat_session_id: str) -> None:
     try:

@@ -1,11 +1,15 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 
 interface WebSocketMessage {
-  type: "start" | "chunk" | "complete" | "error" | "pong";
+  type: "start" | "chunk" | "complete" | "error";
   content?: string;
   message?: string;
   sources?: string[];
 }
+
+// Lambda does not guarantee how long an idle execution environment survives; 5 minutes is a
+// common keep-warm interval and stays under API Gateway's 10 minute WebSocket idle timeout
+const WARMUP_INTERVAL_MS = 5 * 60 * 1000;
 
 interface UseWebSocketOptions {
   onMessage?: (message: WebSocketMessage) => void;
@@ -14,8 +18,16 @@ interface UseWebSocketOptions {
   onError?: (error: Event) => void;
 }
 
+/**
+ * Keeps a WebSocket connection open.
+ *
+ * `getUrl` is called for every connection attempt, so the URL (and any token in it) is fresh
+ * when the socket opens. The WebSocket authorizer only checks the token on $connect, so an open
+ * socket is never closed to refresh it; a new URL is requested only after the socket closes.
+ * Pass null to keep the socket closed.
+ */
 export const useWebSocket = (
-  url: string | null,
+  getUrl: (() => Promise<string | null>) | null,
   options: UseWebSocketOptions = {}
 ) => {
   const wsRef = useRef<WebSocket | null>(null);
@@ -23,29 +35,31 @@ export const useWebSocket = (
   const heartbeatIntervalRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const isManualDisconnectRef = useRef(false);
+  const isResolvingUrlRef = useRef(false);
   const [connectionState, setConnectionState] = useState<
     "connecting" | "connected" | "disconnected" | "error"
   >("disconnected");
 
-  // Store callbacks in refs to avoid dependency issues
+  // Store callbacks and the URL source in refs so changing them never reconnects the socket
   const callbacksRef = useRef(options);
   callbacksRef.current = options;
+  const getUrlRef = useRef(getUrl);
+  getUrlRef.current = getUrl;
+  const isEnabled = getUrl !== null;
 
-  const startHeartbeat = useCallback(() => {
-    if (heartbeatIntervalRef.current) {
-      window.clearInterval(heartbeatIntervalRef.current);
-    }
+  // Lets the reconnect timer call the current connect function
+  const connectRef = useRef<() => void>(() => {});
 
-    heartbeatIntervalRef.current = window.setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        try {
-          wsRef.current.send(JSON.stringify({ type: "ping" }));
-          console.log("[WebSocket] Sent ping");
-        } catch (error) {
-          console.error("[WebSocket] Error sending ping:", error);
-        }
+  // Asks the server to warm the text generation Lambda so the next message skips its cold start.
+  // The same message keeps the connection inside API Gateway's 10 minute idle timeout.
+  const sendWarmup = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      try {
+        wsRef.current.send(JSON.stringify({ action: "warmup" }));
+      } catch (error) {
+        console.error("[WebSocket] Error sending warm-up:", error);
       }
-    }, 30000);
+    }
   }, []);
 
   const stopHeartbeat = useCallback(() => {
@@ -54,6 +68,19 @@ export const useWebSocket = (
       heartbeatIntervalRef.current = null;
     }
   }, []);
+
+  // Warm immediately, then repeat only while the tab is visible
+  const startHeartbeat = useCallback(() => {
+    stopHeartbeat();
+    if (document.visibilityState !== "visible") {
+      return;
+    }
+    sendWarmup();
+    heartbeatIntervalRef.current = window.setInterval(
+      sendWarmup,
+      WARMUP_INTERVAL_MS
+    );
+  }, [sendWarmup, stopHeartbeat]);
 
   const scheduleReconnect = useCallback(() => {
     if (isManualDisconnectRef.current) {
@@ -82,14 +109,17 @@ export const useWebSocket = (
     );
 
     reconnectTimeoutRef.current = window.setTimeout(() => {
+      reconnectTimeoutRef.current = null;
       reconnectAttemptsRef.current++;
-      connect();
+      connectRef.current();
     }, delay);
   }, []);
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
+    const resolveUrl = getUrlRef.current;
     if (
-      !url ||
+      !resolveUrl ||
+      isResolvingUrlRef.current ||
       wsRef.current?.readyState === WebSocket.CONNECTING ||
       wsRef.current?.readyState === WebSocket.OPEN
     ) {
@@ -98,10 +128,37 @@ export const useWebSocket = (
 
     setConnectionState("connecting");
 
+    let url: string | null;
+    isResolvingUrlRef.current = true;
     try {
-      wsRef.current = new WebSocket(url);
+      url = await resolveUrl();
+    } catch (error) {
+      console.error("[WebSocket] Failed to get connection URL:", error);
+      isResolvingUrlRef.current = false;
+      if (isManualDisconnectRef.current) {
+        return;
+      }
+      setConnectionState("error");
+      scheduleReconnect();
+      return;
+    }
+    isResolvingUrlRef.current = false;
 
-      wsRef.current.onopen = () => {
+    // The hook was disconnected or unmounted while the URL was being fetched
+    if (isManualDisconnectRef.current) {
+      return;
+    }
+
+    if (!url) {
+      setConnectionState("disconnected");
+      return;
+    }
+
+    try {
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
         console.log("[WebSocket] Connected successfully");
         setConnectionState("connected");
         reconnectAttemptsRef.current = 0;
@@ -109,7 +166,7 @@ export const useWebSocket = (
         callbacksRef.current.onConnect?.();
       };
 
-      wsRef.current.onmessage = (event) => {
+      ws.onmessage = (event) => {
         try {
           if (typeof event.data === "string" && event.data.length > 1_000_000) {
             console.warn("[WebSocket] Received message string exceeds 1MB, ignoring");
@@ -120,40 +177,45 @@ export const useWebSocket = (
 
           console.log("[WebSocket] Received message");
 
-          if (message.type === "pong") {
-            console.log("[WebSocket] Received pong");
-            return;
-          }
-
           callbacksRef.current.onMessage?.(message);
         } catch (error) {
           console.error("[WebSocket] Error parsing message:", error);
         }
       };
 
-      wsRef.current.onclose = (event) => {
+      ws.onclose = (event) => {
         console.log(
           `[WebSocket] Disconnected - Code: ${event.code}, Reason: ${event.reason}`
         );
+
+        // A socket closed by disconnect() has already been replaced or cleared
+        if (wsRef.current !== ws) {
+          return;
+        }
 
         wsRef.current = null;
         setConnectionState("disconnected");
         stopHeartbeat();
         callbacksRef.current.onDisconnect?.();
 
-        if (!isManualDisconnectRef.current) {
-          if (event.code !== 1000 && event.code !== 1001) {
-            console.log(
-              "[WebSocket] Abnormal closure, attempting to reconnect..."
-            );
-            scheduleReconnect();
-          } else {
-            console.log("[WebSocket] Normal closure, not reconnecting");
-          }
+        if (isManualDisconnectRef.current) {
+          return;
+        }
+
+        // Reconnect with a fresh URL now that the socket is closed. API Gateway closes
+        // connections normally (1001) at its idle timeout and maximum connection duration.
+        if (event.code !== 1000 && event.code !== 1001) {
+          console.log("[WebSocket] Abnormal closure, attempting to reconnect...");
+          scheduleReconnect();
+        } else if (document.visibilityState === "visible") {
+          console.log("[WebSocket] Normal closure, reconnecting...");
+          scheduleReconnect();
+        } else {
+          console.log("[WebSocket] Normal closure, reconnecting when the tab is visible");
         }
       };
 
-      wsRef.current.onerror = (error) => {
+      ws.onerror = (error) => {
         console.error("[WebSocket] Connection error:", error);
         setConnectionState("error");
         callbacksRef.current.onError?.(error);
@@ -163,7 +225,9 @@ export const useWebSocket = (
       setConnectionState("error");
       scheduleReconnect();
     }
-  }, [url, startHeartbeat, stopHeartbeat, scheduleReconnect]);
+  }, [startHeartbeat, stopHeartbeat, scheduleReconnect]);
+
+  connectRef.current = connect;
 
   const disconnect = useCallback(() => {
     console.log("[WebSocket] Manual disconnect requested");
@@ -177,8 +241,9 @@ export const useWebSocket = (
     stopHeartbeat();
 
     if (wsRef.current) {
-      wsRef.current.close(1000, "Manual disconnect");
+      const ws = wsRef.current;
       wsRef.current = null;
+      ws.close(1000, "Manual disconnect");
     }
 
     setConnectionState("disconnected");
@@ -220,9 +285,32 @@ export const useWebSocket = (
     }, 1000);
   }, [disconnect, connect]);
 
-  // Only depend on URL changes, not callback changes
+  // Stop warming while the tab is hidden. When it becomes visible again, warm right away,
+  // reconnecting first if API Gateway closed the idle connection in the meantime.
   useEffect(() => {
-    if (url) {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") {
+        stopHeartbeat();
+        return;
+      }
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        startHeartbeat();
+      } else if (isEnabled && !isManualDisconnectRef.current) {
+        reconnectAttemptsRef.current = 0;
+        connect();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isEnabled, connect, startHeartbeat, stopHeartbeat]);
+
+  // Connect once streaming is enabled. A new getUrl function does not reconnect the socket.
+  useEffect(() => {
+    if (isEnabled) {
       isManualDisconnectRef.current = false;
       connect();
     }
@@ -231,7 +319,7 @@ export const useWebSocket = (
       isManualDisconnectRef.current = true;
       disconnect();
     };
-  }, [url]); // Only URL dependency!
+  }, [isEnabled, connect, disconnect]);
 
   const isConnected = wsRef.current?.readyState === WebSocket.OPEN;
 

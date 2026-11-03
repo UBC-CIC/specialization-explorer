@@ -1,7 +1,8 @@
 
-import boto3
 import logging
 from typing import List, Dict, Any
+
+from helpers.aws_clients import get_bedrock_client
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -16,7 +17,7 @@ def retrieve_documents(
     """
     Retrieve documents from the Knowledge Base.
     """
-    agent_runtime = boto3.client("bedrock-agent-runtime", region_name=region)
+    agent_runtime = get_bedrock_client("bedrock-agent-runtime", region)
     
     try:
         response = agent_runtime.retrieve(

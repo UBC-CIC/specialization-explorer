@@ -1,10 +1,15 @@
 import boto3
 import logging
 import re
+import time
 from typing import Dict, Any, Optional, List, Tuple
 
+from helpers.tracing import tracer
+from helpers.aws_clients import get_bedrock_client
+
 from helpers.crud import (
-    fetch_recent_messages, ensure_session_exists, insert_message, update_last_active_session
+    fetch_recent_messages, ensure_session_exists, insert_message, update_last_active_session,
+    message_exists, DuplicateMessageError
 )
 from helpers.logic import get_current_prompt
 from helpers.bedrock import retrieve_documents, format_context_for_prompt
@@ -56,7 +61,7 @@ Output ONLY the search query. Do not include explanations, preambles, or quotes.
 """
 
     try:
-        bedrock_runtime = boto3.client("bedrock-runtime", region_name=llm_region)
+        bedrock_runtime = get_bedrock_client("bedrock-runtime", llm_region)
         response = bedrock_runtime.converse(
             modelId=haiku_model_arn or config.HAIKU_ARN,
             messages=[{"role": "user", "content": [{"text": user_message}]}],
@@ -80,7 +85,8 @@ def _prepare_conversation(
     user_id: Optional[str],
     db_connection,
     search_type: Optional[str] = None,
-    save_user_message: bool = True
+    save_user_message: bool = True,
+    user_message_id: Optional[str] = None
 ) -> Tuple[List[Dict[str, Any]], str, List[Dict[str, Any]], str]:
     """
     Handles validation, history fetching, user msg saving, retrieval, and prompt construction.
@@ -107,10 +113,14 @@ def _prepare_conversation(
                 "user",
                 query,
                 sources=None,
-                warning=None
+                warning=None,
+                message_id=user_message_id
             )
             update_last_active_session(db_connection, chat_session_id)
             db_connection.commit()
+    except DuplicateMessageError:
+        db_connection.rollback()
+        raise
     except Exception as e:
         db_connection.rollback()
         logger.error(f"DB Error: {e}")
@@ -123,20 +133,22 @@ def _prepare_conversation(
     )
 
     # 5. Rewrite query for better retrieval
-    search_query = _rewrite_query_for_retrieval(
-        raw_query=query,
-        chat_history=raw_history,
-        llm_region=llm_region
-    )
+    with tracer.provider.in_subsegment("## query_rewrite"):
+        search_query = _rewrite_query_for_retrieval(
+            raw_query=query,
+            chat_history=raw_history,
+            llm_region=llm_region
+        )
 
     # 6. RAG Retrieval (using rewritten query)
-    sources = retrieve_documents(
-        search_query,
-        knowledge_base_id,
-        region,
-        num_retrieval_results,
-        search_type=search_type
-    )
+    with tracer.provider.in_subsegment("## kb_retrieve"):
+        sources = retrieve_documents(
+            search_query,
+            knowledge_base_id,
+            region,
+            num_retrieval_results,
+            search_type=search_type
+        )
     
     # 7. Build Context
     context_block = format_context_for_prompt(sources)
@@ -226,10 +238,14 @@ def get_response(
     save_user_message: bool = True,
     stream_callback=None,
     is_intro_message: bool = False,
+    user_message_id: Optional[str] = None,
+    max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     
     usage_info = {}
     is_under_limit = True
+    guardrail_invoked = False
+    request_started_at = time.monotonic()
 
     # The flag is client-supplied, so it only counts for the fixed intro prompt
     is_intro_message = is_intro_message and query == INTRO_PROMPT
@@ -251,9 +267,16 @@ def get_response(
                 "intervention": None
             }
 
+        # Reject a replayed message id before any billable model call
+        if user_message_id and message_exists(db_connection, user_message_id, user_id):
+            raise DuplicateMessageError("A message with this id has already been saved")
+
         if not is_intro_message:
             try:
-                guardrail_result = invoke_guardrail(query, config.REGION)
+                # Runs before the query rewrite so later model calls only see redacted text
+                with tracer.provider.in_subsegment("## guardrail"):
+                    guardrail_invoked = True
+                    guardrail_result = invoke_guardrail(query, config.REGION)
             except Exception as e:
                 logger.error(f"Guardrail invocation failed: {e}")
                 return {
@@ -267,9 +290,15 @@ def get_response(
                 denial_text = guardrail_result['text']
                 try:
                     ensure_session_exists(db_connection, chat_session_id, user_id)
-                    insert_message(db_connection, chat_session_id, 'user', query, sources=None, warning=None)
+                    insert_message(
+                        db_connection, chat_session_id, 'user', query,
+                        sources=None, warning=None, message_id=user_message_id
+                    )
                     update_last_active_session(db_connection, chat_session_id)
                     db_connection.commit()
+                except DuplicateMessageError:
+                    db_connection.rollback()
+                    raise
                 except Exception as db_err:
                     db_connection.rollback()
                     logger.error(f"DB error saving user message on intervention: {db_err}")
@@ -297,12 +326,28 @@ def get_response(
             chat_session_id,
             user_id,
             db_connection,
-            save_user_message=save_user_message
+            save_user_message=save_user_message,
+            user_message_id=user_message_id
         )
 
         if save_user_message:
             usage_info = record_message_sent(user_id, db_connection)
 
+    except DuplicateMessageError:
+        # The same request was already received; answering again would save a second reply
+        logger.warning("Ignoring a repeated request for a message that is already saved")
+        if guardrail_invoked:
+            # The id slipped past the pre-check (a concurrent replay, or an id saved by another
+            # user) after a guardrail call was already paid for; meter it
+            record_message_sent(user_id, db_connection)
+        return {
+            "response": "This message has already been received.",
+            "sources_used": [],
+            "sessionId": chat_session_id,
+            "duplicate_message": True,
+            "warning": None,
+            "intervention": None,
+        }
     except ValueError as e:
         return {
             "response": str(e),
@@ -333,7 +378,7 @@ def get_response(
                 {"text": dynamic_prompt}
             ],
             "inferenceConfig": {
-                "maxTokens": config.MAX_TOKENS
+                "maxTokens": max_tokens or config.MAX_TOKENS
             }
         }
 
@@ -345,13 +390,16 @@ def get_response(
             "output_config": {"effort": "low"}
         }
 
-    bedrock_runtime = boto3.client("bedrock-runtime", region_name=llm_region)
+    bedrock_runtime = get_bedrock_client("bedrock-runtime", llm_region)
     
     full_response_text = ""
     yielded_text = ""
     answer_started = False
     answer_text = ""
     cited_indices = []
+
+    first_token_recorded = False
+    stream_subsegment = tracer.provider.begin_subsegment("## model_stream")
 
     try:
         response = bedrock_runtime.converse_stream(**request_payload)
@@ -396,6 +444,13 @@ def get_response(
                     if len(safe_text) > len(yielded_text):
                         new_text = safe_text[len(yielded_text):]
                         yielded_text += new_text
+                        if new_text and not first_token_recorded:
+                            first_token_recorded = True
+                            # Time from the start of the request until the user sees answer text
+                            tracer.put_annotation(
+                                key="time_to_first_token_ms",
+                                value=int((time.monotonic() - request_started_at) * 1000),
+                            )
                         if stream_callback and new_text:
                             stream_callback(new_text)
 
@@ -404,7 +459,9 @@ def get_response(
         if final_answer_match:
             answer_text = final_answer_match.group(1).strip()
         else:
-            answer_text = full_response_text.split('<cited_indices>')[0].strip()
+            # No closing tag, e.g. the answer stopped at the token limit
+            answer_text = full_response_text.split('<cited_indices>')[0]
+            answer_text = answer_text.split('<answer>', 1)[-1].split('</answer>')[0].strip()
             
         # Parse cited_indices
         indices_match = re.search(r'<cited_indices>\s*\[(.*?)\]\s*</cited_indices>', full_response_text, re.DOTALL)
@@ -420,6 +477,9 @@ def get_response(
         logger.error(f"Generation Failed: {e}")
         answer_text = "I encountered an error generating the response."
         cited_indices = []
+    finally:
+        if stream_subsegment is not None:
+            tracer.provider.end_subsegment()
 
     used_sources = []
     for i, source in enumerate(sources, 1):
@@ -431,12 +491,13 @@ def get_response(
 
     if phase_name == "SUGGESTION" and answer_text and not answer_text.startswith("I encountered an error"):
         try:
-            intervention_result = assess_response(
-                query=query,
-                answer_text=answer_text,
-                sources=used_sources,
-                llm_region=llm_region
-            )
+            with tracer.provider.in_subsegment("## verifier"):
+                intervention_result = assess_response(
+                    query=query,
+                    answer_text=answer_text,
+                    sources=used_sources,
+                    llm_region=llm_region
+                )
             warning_text = intervention_result.get("warning_text")
         except Exception as e:
             logger.error(f"Intervention Failed: {e}")

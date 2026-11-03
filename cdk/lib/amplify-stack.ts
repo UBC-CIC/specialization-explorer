@@ -98,6 +98,14 @@ export class AmplifyStack extends cdk.Stack {
               "form-action 'self'",
               "frame-ancestors 'none'",
             ].join("; "),
+            // HTTPS only for a year, including other branch subdomains of this app
+            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+            // Cross-origin requests and links send only the origin, never the path
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+            // Browsers use the declared content type instead of guessing it
+            "X-Content-Type-Options": "nosniff",
+            // The app uses none of these browser features, so pages cannot request them
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
           },
         },
       ],

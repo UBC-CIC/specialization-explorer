@@ -52,6 +52,8 @@ type ChatSession = {
     title: string;
     created_at: string;
     last_active_at: string;
+    // Position among the user's sessions by creation, oldest = 1 (matches the student sidebar)
+    chat_number: number;
 };
 
 type ChatMessage = {
@@ -300,7 +302,7 @@ export default function ChatHistory() {
                                                 ) : !userSessions[user.id] || userSessions[user.id].length === 0 ? (
                                                     <div className="text-xs text-center text-gray-400 py-2">No sessions found.</div>
                                                 ) : (
-                                                    userSessions[user.id].map((session, sessionIndex) => (
+                                                    userSessions[user.id].map((session) => (
                                                         <button
                                                             key={session.id}
                                                             onClick={() => handleSessionSelect(session.id)}
@@ -317,7 +319,7 @@ export default function ChatHistory() {
                                                                     "text-sm font-semibold truncate",
                                                                     selectedSessionId === session.id ? "text-primary" : "text-gray-700"
                                                                 )}>
-                                                                    {session.title || `Chat ${sessionIndex + 1}`}
+                                                                    {session.title || `Chat ${session.chat_number}`}
                                                                 </span>
                                                             </div>
                                                             <div className="flex items-center gap-1 text-[10px] text-gray-500 pl-5">

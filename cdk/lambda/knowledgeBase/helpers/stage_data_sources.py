@@ -1,6 +1,11 @@
 import os
+import io
+import csv
 import json
 import logging
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+
 import boto3
 
 from helpers.cors import get_cors_headers
@@ -16,6 +21,14 @@ KB_BUCKET = os.environ["KNOWLEDGE_BASE_BUCKET_NAME"]
 # has validated it (the data source is limited to this prefix).
 QUARANTINE_PREFIX = "quarantine/"
 APPROVED_PREFIX = "uploads/"
+
+# Semantic chunking rejects a document whose text exceeds 1,000,000 characters, and the
+# chunking strategy cannot be changed on an existing data source. Larger CSV files are split
+# into row groups below this size, each with the header row and a copy of the metadata file.
+# Larger Markdown files cannot be split safely, so they are rejected at staging.
+# https://docs.aws.amazon.com/bedrock/latest/userguide/kb-chunking.html
+MAX_DOCUMENT_CHARACTERS = 900_000
+CSV_PART_UPLOAD_WORKERS = 8
 
 s3_client = boto3.client("s3", region_name=REGION)
 
@@ -64,9 +77,9 @@ def _validate_file_pair(source_type: str, file_name: str, metadata_file_name: st
     return None
 
 
-def _assert_s3_object_exists(bucket: str, key: str):
-    """Verify that an uploaded file already exists in S3 before staging it"""
-    s3_client.head_object(Bucket=bucket, Key=key)
+def _assert_s3_object_exists(bucket: str, key: str) -> int:
+    """Verify that an uploaded file already exists in S3 before staging it; returns its size in bytes"""
+    return s3_client.head_object(Bucket=bucket, Key=key)["ContentLength"]
 
 
 def _approved_key_for(bucket: str, key: str) -> str:
@@ -89,6 +102,115 @@ def _promote_upload(key: str, approved_key: str):
         Key=approved_key,
         CopySource={"Bucket": KB_BUCKET, "Key": key},
     )
+
+
+def _csv_part_key(approved_key: str, part_number: int) -> str:
+    """uploads/dir/data.csv -> uploads/dir/data.part001.csv"""
+    base = approved_key[: -len(".csv")] if approved_key.lower().endswith(".csv") else approved_key
+    return f"{base}.part{part_number:03d}.csv"
+
+
+def _split_csv_rows(key: str) -> list[str]:
+    """
+    Reads a CSV upload and returns its rows grouped into parts of at most
+    MAX_DOCUMENT_CHARACTERS, each starting with the header row. Rows are parsed with the csv
+    module, so quoted fields that contain line breaks stay in one row.
+    """
+    with tempfile.TemporaryFile() as raw:
+        s3_client.download_fileobj(KB_BUCKET, key, raw)
+        raw.seek(0)
+        text = io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+
+        def serialize(row: list[str]) -> str:
+            buffer = io.StringIO()
+            csv.writer(buffer).writerow(row)
+            return buffer.getvalue()
+
+        try:
+            reader = csv.reader(text)
+            header_row = next(reader, None)
+            if header_row is None:
+                raise InvalidUploadError("CSV file is empty")
+            header = serialize(header_row)
+
+            parts = []
+            current = [header]
+            current_length = len(header)
+            for row in reader:
+                line = serialize(row)
+                if len(header) + len(line) > MAX_DOCUMENT_CHARACTERS:
+                    raise InvalidUploadError(
+                        f"A CSV row exceeds the {MAX_DOCUMENT_CHARACTERS:,}-character document limit"
+                    )
+                if current_length + len(line) > MAX_DOCUMENT_CHARACTERS:
+                    parts.append("".join(current))
+                    current = [header]
+                    current_length = len(header)
+                current.append(line)
+                current_length += len(line)
+            parts.append("".join(current))
+        except UnicodeDecodeError:
+            raise InvalidUploadError("Large CSV files must be UTF-8 encoded")
+        except csv.Error as e:
+            raise InvalidUploadError(f"CSV file could not be parsed: {e}")
+        finally:
+            text.detach()
+
+    return parts
+
+
+def _promote_file_pair(
+    *,
+    source_type: str,
+    primary_key: str,
+    primary_approved_key: str,
+    primary_size: int,
+    metadata_key: str,
+    metadata_approved_key: str,
+    promoted_keys: list[str],
+) -> list[str] | None:
+    """
+    Copies a validated file and its metadata file into the ingested prefix.
+
+    A CSV over the document limit is written as several part files instead of one copy, each
+    with its own metadata file, and the part keys are returned. Otherwise returns None.
+    Every key written is added to promoted_keys so a failed request can remove it.
+    """
+    # Byte size is an upper bound on the character count, so smaller files never need a split
+    if primary_size <= MAX_DOCUMENT_CHARACTERS:
+        _promote_upload(primary_key, primary_approved_key)
+        promoted_keys.append(primary_approved_key)
+        _promote_upload(metadata_key, metadata_approved_key)
+        promoted_keys.append(metadata_approved_key)
+        return None
+
+    if source_type != "csv":
+        raise InvalidUploadError(
+            f"Markdown files must be under {MAX_DOCUMENT_CHARACTERS:,} characters; split the file and upload the parts"
+        )
+
+    parts = _split_csv_rows(primary_key)
+    part_keys = [_csv_part_key(primary_approved_key, i) for i in range(1, len(parts) + 1)]
+    logger.info("Splitting CSV %s into %d parts", primary_approved_key, len(parts))
+
+    # Record the keys first, so a part that fails midway is still removed on cleanup
+    for part_key in part_keys:
+        promoted_keys.extend([part_key, f"{part_key}.metadata.json"])
+
+    def write_part(index: int):
+        part_key = part_keys[index]
+        s3_client.put_object(
+            Bucket=KB_BUCKET,
+            Key=part_key,
+            Body=parts[index].encode("utf-8"),
+            ContentType="text/csv",
+        )
+        _promote_upload(metadata_key, f"{part_key}.metadata.json")
+
+    with ThreadPoolExecutor(max_workers=CSV_PART_UPLOAD_WORKERS) as executor:
+        list(executor.map(write_part, range(len(parts))))
+
+    return part_keys
 
 
 def _discard_promoted(approved_keys):
@@ -333,7 +455,7 @@ def stage_data_sources(event, body, connection, acting_user):
             return _response(event, 400, {"error": str(e)})
 
         try:
-            _assert_s3_object_exists(primary_s3_bucket, primary_s3_key)
+            primary_size = _assert_s3_object_exists(primary_s3_bucket, primary_s3_key)
             _assert_s3_object_exists(metadata_s3_bucket, metadata_s3_key)
         except Exception as e:
             logger.error("Uploaded file not found in S3: %s", e, exc_info=True)
@@ -367,10 +489,19 @@ def stage_data_sources(event, body, connection, acting_user):
                 },
             )
 
-        _promote_upload(primary_s3_key, primary_approved_key)
-        promoted_keys.append(primary_approved_key)
-        _promote_upload(metadata_s3_key, metadata_approved_key)
-        promoted_keys.append(metadata_approved_key)
+        try:
+            part_keys = _promote_file_pair(
+                source_type=source_type,
+                primary_key=primary_s3_key,
+                primary_approved_key=primary_approved_key,
+                primary_size=primary_size,
+                metadata_key=metadata_s3_key,
+                metadata_approved_key=metadata_approved_key,
+                promoted_keys=promoted_keys,
+            )
+        except InvalidUploadError as e:
+            _discard_promoted(promoted_keys)
+            return _response(event, 400, {"error": str(e)})
         primary_s3_key, metadata_s3_key = primary_approved_key, metadata_approved_key
 
         primary_data_source_metadata = {
@@ -392,6 +523,11 @@ def stage_data_sources(event, body, connection, acting_user):
             "companion_s3_bucket": primary_s3_bucket,
             "companion_s3_key": primary_s3_key,
         }
+
+        # s3_key stays the logical key used for duplicate checks; ingestion reads the parts
+        if part_keys:
+            primary_data_source_metadata["s3_part_keys"] = part_keys
+            json_data_source_metadata["s3_part_keys"] = [f"{k}.metadata.json" for k in part_keys]
 
         primary_data_source_id = _insert_data_source_row(
             connection,

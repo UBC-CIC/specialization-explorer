@@ -181,10 +181,12 @@ export class KnowledgeBaseStack extends Stack {
 
     // Use account and region for uniqueness (see https://aws.amazon.com/blogs/aws/introducing-account-regional-namespaces-for-amazon-s3-general-purpose-buckets/)
     // CORS is configured by the amplify-stack with the amplify-url to restrict requests only to our application
+    // Holds the source documents, so it is kept (with its objects) if the stack is deleted.
+    // Turning off autoDeleteObjects removes the bucket's aws-cdk:auto-delete-objects tag
+    // before the cleanup resource is deleted, and that handler only empties tagged buckets.
     this.knowledgeBaseBucket = new s3.Bucket(this, "KnowledgeBaseBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      removalPolicy: RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      removalPolicy: RemovalPolicy.RETAIN,
       enforceSSL: true,
       versioned: true,
       lifecycleRules: [
@@ -234,7 +236,7 @@ export class KnowledgeBaseStack extends Stack {
     }));
 
     const ecrImageWaiterFn = new lambda.Function(this, "KBEcrImageWaiterFn", {
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       handler: "index.handler",
       role: ecrImageWaiterRole,
       timeout: cdk.Duration.minutes(15),
@@ -279,9 +281,16 @@ export class KnowledgeBaseStack extends Stack {
     });
     vectorIndexManagerFn.node.addDependency(ecrImageWaiter);
 
+    // The pipeline publishes a version for each scanned image and moves this alias to it,
+    // so the provider always runs a known version and can be rolled back by moving the alias
+    const vectorIndexManagerLive = new lambda.Alias(this, "VectorIndexManagerLive", {
+      aliasName: "live",
+      version: vectorIndexManagerFn.currentVersion,
+    });
+
     const vectorIndexProvider = new Provider(this, "VectorIndexProvider", {
-      onEventHandler: vectorIndexManagerFn,
-      isCompleteHandler: vectorIndexManagerFn,
+      onEventHandler: vectorIndexManagerLive,
+      isCompleteHandler: vectorIndexManagerLive,
       queryInterval: cdk.Duration.seconds(30),
       totalTimeout: cdk.Duration.minutes(30),
     });

@@ -19,6 +19,19 @@ MAX_WEB_DATA_SOURCES = MAX_TOTAL_DATA_SOURCES - RESERVED_NON_WEB_DATA_SOURCES
 WEBSITE_BATCH_SIZE = 5
 LOW_REMAINING_PAGES_THRESHOLD = 5000
 
+# Bedrock rejects a web crawler update with more than 100 seed URLs, or with seed URLs whose
+# combined length is 3,000 characters or more ("must be less than 3000 characters").
+# https://docs.aws.amazon.com/bedrock/latest/APIReference/API_agent_UrlConfiguration.html
+MAX_SEED_URLS = 100
+MAX_SEED_URL_CHARS = 2999
+
+# Since September 30, 2026, new Web Crawler connectors cannot be created on customer-managed
+# knowledge bases; existing ones keep working. Websites that do not fit the existing crawler
+# are marked failed instead of waiting for a crawler that can never be created.
+# https://docs.aws.amazon.com/bedrock/latest/userguide/webcrawl-data-source-connector.html
+NEW_WEB_CRAWLERS_SUPPORTED = False
+WEB_CRAWLER_DOCS_URL = "https://docs.aws.amazon.com/bedrock/latest/userguide/webcrawl-data-source-connector.html"
+
 SYNCING_STATUSES = {"STARTING", "IN_PROGRESS", "STOPPING"}
 FAILED_STATUSES = {"FAILED"}
 SUCCESS_STATUSES = {"COMPLETE"}
@@ -310,32 +323,81 @@ def _group_key_for_website_run(run: dict) -> str:
     )
 
 
-def _next_queued_website_batch(connection, batch_size: int) -> list[dict]:
+def _plan_website_batch(
+    queued_websites: list[dict],
+    batch_size: int,
+    existing_seed_urls: list[str],
+) -> tuple[list[dict], list[dict]]:
     """
-    Select the next queued website batch, constrained by filter compatibility.
+    Select the next website batch for a crawler that already has existing_seed_urls.
 
-    The batch starts from the oldest queued website and only includes additional
-    queued websites that share the same include/exclude patterns.
+    The batch starts from the oldest queued website that fits and only includes more
+    websites that share its include/exclude patterns. A website fits when adding it keeps
+    the crawler within MAX_SEED_URLS and MAX_SEED_URL_CHARS.
+
+    Returns the batch and the queued websites that cannot fit. Capacity only shrinks as
+    batches are added, so a website that does not fit now never will on this crawler.
     """
-    queued_websites = _latest_run_rows_by_status(
-        connection,
-        status="queued",
-        data_source_type="website",
-    )
-    if not queued_websites:
-        return []
-
-    first = queued_websites[0]
-    group_key = _group_key_for_website_run(first)
+    existing = set(existing_seed_urls)
+    remaining_count = MAX_SEED_URLS - len(existing)
+    remaining_chars = MAX_SEED_URL_CHARS - sum(len(url) for url in existing)
 
     batch = []
+    unfit = []
+    group_key = None
     for run in queued_websites:
-        if _group_key_for_website_run(run) == group_key:
-            batch.append(run)
-        if len(batch) >= batch_size:
-            break
+        url = run["name"]
+        cost_count, cost_chars = (0, 0) if url in existing else (1, len(url))
+        if cost_count > remaining_count or cost_chars > remaining_chars:
+            unfit.append(run)
+            continue
 
-    return batch
+        if len(batch) >= batch_size:
+            continue
+        key = _group_key_for_website_run(run)
+        if group_key is None:
+            group_key = key
+        if key != group_key:
+            continue
+
+        batch.append(run)
+        existing.add(url)
+        remaining_count -= cost_count
+        remaining_chars -= cost_chars
+
+    return batch, unfit
+
+
+def _crawler_full_message(seed_urls: list[str]) -> str:
+    """The error shown on a website that cannot be added to the web crawler"""
+    return (
+        "Not added: the web crawler is full. Bedrock allows at most "
+        f"{MAX_SEED_URLS} seed URLs per web crawler with a combined length under "
+        f"{MAX_SEED_URL_CHARS + 1:,} characters, and it has {len(seed_urls)} URLs totalling "
+        f"{sum(len(url) for url in seed_urls):,} characters. New web crawlers can no longer "
+        f"be created ({WEB_CRAWLER_DOCS_URL}). Remove websites from the crawler, use a "
+        "shorter parent URL that covers several pages, or upload the page as a Markdown file."
+    )
+
+
+def _mark_runs_failed(connection, *, ingestion_run_ids: list[str], error_message: str):
+    """Mark queued website runs failed so they stop waiting for crawler capacity"""
+    if not ingestion_run_ids:
+        return 0
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE ingestion_runs
+            SET
+                status = 'failed'::ingestion_status,
+                error_message = %s,
+                completed_at = NOW()
+            WHERE id = ANY(%s::uuid[])
+              AND status = 'queued'::ingestion_status
+            """,
+            (error_message, ingestion_run_ids),
+        )
+        return cursor.rowcount
 
 
 def _build_updated_web_config(data_source: dict, new_urls: list[str], include_patterns: list[str], exclude_patterns: list[str]) -> dict:
@@ -529,7 +591,7 @@ def _create_ingestion_polling_schedule(
     sync_session_id: str,
 ) -> str:
     """
-    Create the 30-minute scheduler that polls the website ingestion job.
+    Create the 10-minute scheduler that polls the website ingestion job.
 
     The scheduler payload carries the sync session ID and the database run IDs
     so update_status can later update all affected website runs together.
@@ -550,7 +612,9 @@ def _create_ingestion_polling_schedule(
     scheduler_client.create_schedule(
         Name=schedule_name,
         GroupName="default",
-        ScheduleExpression="rate(30 minutes)",
+        # A web crawl takes at least ~5 minutes, so polling more often than 10 minutes rarely
+        # finds it done sooner, and 10 minutes stays well above the Lambda's 300 s timeout.
+        ScheduleExpression="rate(10 minutes)",
         FlexibleTimeWindow={"Mode": "OFF"},
         State="ENABLED",
         Target={
@@ -612,10 +676,11 @@ def process_website_batch(event, connection, kb_id, sync_session_id: str, trigge
     - decides batch size:
       - 1 when the crawler is near the low remaining-pages threshold
       - otherwise up to 5
-    - selects the next queued website batch with compatible filters
+    - selects the next queued website batch with compatible filters that fits the
+      crawler's seed URL limits, and marks queued websites that cannot fit as failed
     - updates an existing crawler or creates a new one
     - starts the Bedrock ingestion job
-    - creates the 30-minute polling scheduler
+    - creates the 10-minute polling scheduler
     - marks the selected database runs as running
 
     It returns a structured result describing whether the phase started and
@@ -651,12 +716,74 @@ def process_website_batch(event, connection, kb_id, sync_session_id: str, trigge
     else:
         batch_size = WEBSITE_BATCH_SIZE
 
-    batch = _next_queued_website_batch(connection, batch_size=batch_size)
-    if not batch:
+    queued_websites = _latest_run_rows_by_status(
+        connection,
+        status="queued",
+        data_source_type="website",
+    )
+    if not queued_websites:
         return {
             "started": False,
             "phase": "website",
             "message": "No queued website runs found.",
+        }
+
+    can_create_crawler = NEW_WEB_CRAWLERS_SUPPORTED and len(web_crawlers) < MAX_WEB_DATA_SOURCES
+
+    if selected:
+        seed_urls = selected["seed_urls"]
+    elif can_create_crawler:
+        seed_urls = []
+    elif any(x["state"] == "syncing" for x in classified):
+        # The crawler is busy with another job; the running sync picks these up afterwards
+        return {
+            "started": False,
+            "phase": "website",
+            "message": "The web crawler is busy; queued websites will be added after its current job.",
+        }
+    else:
+        # Every crawler has reached its page limit and no new one can be created
+        error_message = (
+            "Not added: the web crawler has reached its page limit and new web crawlers "
+            f"can no longer be created ({WEB_CRAWLER_DOCS_URL})."
+        )
+        failed_count = _mark_runs_failed(
+            connection,
+            ingestion_run_ids=[x["ingestion_run_id"] for x in queued_websites],
+            error_message=error_message,
+        )
+        connection.commit()
+        return {
+            "started": False,
+            "phase": "website",
+            "failed_count": failed_count,
+            "message": f"{failed_count} queued websites could not be added: {error_message}",
+        }
+
+    batch, unfit = _plan_website_batch(queued_websites, batch_size, seed_urls)
+
+    failed_count = 0
+    if unfit and not (selected and can_create_crawler):
+        failed_count = _mark_runs_failed(
+            connection,
+            ingestion_run_ids=[x["ingestion_run_id"] for x in unfit],
+            error_message=_crawler_full_message(seed_urls),
+        )
+        connection.commit()
+        logger.warning("Marked %d queued websites failed: web crawler is full", failed_count)
+
+    if not batch:
+        if failed_count:
+            return {
+                "started": False,
+                "phase": "website",
+                "failed_count": failed_count,
+                "message": f"{failed_count} queued websites could not be added because the web crawler is full.",
+            }
+        return {
+            "started": False,
+            "phase": "website",
+            "message": "No queued website fits the web crawler.",
         }
 
     urls = [x["name"] for x in batch]
@@ -665,13 +792,31 @@ def process_website_batch(event, connection, kb_id, sync_session_id: str, trigge
     ingestion_run_ids = [x["ingestion_run_id"] for x in batch]
 
     if selected:
-        target_data_source = _update_existing_web_data_source(
-            data_source=selected["data_source"],
-            knowledge_base_id=kb_id,
-            new_urls=urls,
-            include_patterns=include_patterns,
-            exclude_patterns=exclude_patterns,
-        )
+        try:
+            target_data_source = _update_existing_web_data_source(
+                data_source=selected["data_source"],
+                knowledge_base_id=kb_id,
+                new_urls=urls,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+            )
+        except bedrock_agent.exceptions.ValidationException as e:
+            # Bedrock rejected the new configuration (for example a limit this code does not
+            # check). Fail the batch with Bedrock's reason so it does not stay queued forever.
+            error_message = f"Not added: Bedrock rejected the web crawler update. {e}"
+            failed_count += _mark_runs_failed(
+                connection,
+                ingestion_run_ids=ingestion_run_ids,
+                error_message=error_message,
+            )
+            connection.commit()
+            logger.error("Web crawler update rejected for %s: %s", urls, e)
+            return {
+                "started": False,
+                "phase": "website",
+                "failed_count": failed_count,
+                "message": f"{failed_count} queued websites could not be added: {error_message}",
+            }
         action = "updated_existing_web_data_source"
     else:
         if len(web_crawlers) >= MAX_WEB_DATA_SOURCES:

@@ -12,6 +12,13 @@ REGION = os.environ.get("REGION", "ca-central-1")
 DB_SECRET_NAME = os.environ.get("SM_DB_CREDENTIALS")
 RDS_PROXY_ENDPOINT = os.environ.get("RDS_PROXY_ENDPOINT")
 
+# RDS Proxy presents an ACM certificate, so it is verified against the Amazon Trust Services
+# roots rather than the RDS CA bundle. verify-full also checks the host name.
+# https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.howitworks.html
+DB_CA_BUNDLE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "certs", "amazon-root-ca.pem"
+)
+
 # Cached resources
 connection = None
 
@@ -33,14 +40,16 @@ def get_db_connection():
     global connection
     try:
         if connection is None or connection.closed:
+            # The database only admits the proxy, so there is no direct-connection fallback
+            if not RDS_PROXY_ENDPOINT:
+                raise ValueError("RDS_PROXY_ENDPOINT environment variable not set")
+
             secret = get_secret()
 
-            # If proxy endpoint is not set, fallback to secret's host (direct connection, might fail if in private subnet without VPC config?)
-            host = RDS_PROXY_ENDPOINT if RDS_PROXY_ENDPOINT else secret.get('host')
-
             connection = psycopg2.connect(
-                sslmode='require',
-                host=host,
+                sslmode='verify-full',
+                sslrootcert=DB_CA_BUNDLE,
+                host=RDS_PROXY_ENDPOINT,
                 user=secret.get('username'),
                 password=secret.get('password'),
                 dbname=secret.get('dbname'),
@@ -49,9 +58,9 @@ def get_db_connection():
         return connection
     except Exception as e:
         if connection: 
-            try: 
+            try:
                 connection.close()
-            except: 
+            except Exception as close_err:
                 logger.warning(f"Failed to close DB connection during cleanup: {close_err}")
             connection = None
         logger.error(f"Failed to connect to database: {e}")

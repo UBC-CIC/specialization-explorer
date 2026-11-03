@@ -115,13 +115,17 @@ function typeLabel(t: DataSourceType) {
   return t;
 }
 
-function statusBadge(status: IngestionRunStatus | "no_runs") {
+// hasErrors: the run completed but the ingestion job reported failure reasons
+function statusBadge(status: IngestionRunStatus | "no_runs", hasErrors = false) {
   switch (status) {
     case "pending":
       return <Badge className="bg-gray-100 text-gray-700">Pending</Badge>;
     case "queued":
       return <Badge className="bg-amber-100 text-amber-700">Queued</Badge>;
     case "completed":
+      if (hasErrors) {
+        return <Badge className="bg-orange-100 text-orange-700">Completed with errors</Badge>;
+      }
       return <Badge className="bg-green-100 text-green-700">Completed</Badge>;
     case "failed":
       return <Badge className="bg-red-100 text-red-700">Failed</Badge>;
@@ -1504,7 +1508,9 @@ export default function DataSourceManagement() {
                             <Badge variant="secondary">{typeLabel(ds.type)}</Badge>
                           </TableCell>
 
-                          <TableCell className="align-top">{statusBadge(status)}</TableCell>
+                          <TableCell className="align-top">
+                            {statusBadge(status, Boolean(run?.error_message))}
+                          </TableCell>
 
                           <TableCell className="align-top text-sm text-gray-700">
                             {formatDateTime(ds.created_at)}
@@ -1591,7 +1597,7 @@ export default function DataSourceManagement() {
                                               </div>
 
                                               <div className="px-3 py-3 border-r border-gray-100">
-                                                {statusBadge(jsonStatus)}
+                                                {statusBadge(jsonStatus, Boolean(jsonRun?.error_message))}
                                               </div>
 
                                               <div className="px-3 py-3 border-r border-gray-100 text-xs text-gray-700">
@@ -1609,6 +1615,26 @@ export default function DataSourceManagement() {
                                           </div>
                                         )}
                                       </div>
+
+                                      {/* Failure reasons reported by the Bedrock ingestion job */}
+                                      {run?.error_message || jsonRun?.error_message ? (
+                                        <div className="space-y-2">
+                                          <div className="text-sm font-medium text-gray-800">
+                                            Ingestion errors
+                                          </div>
+                                          {run?.error_message ? (
+                                            <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded p-3 break-words">
+                                              {run.error_message}
+                                            </div>
+                                          ) : null}
+                                          {jsonRun?.error_message &&
+                                          jsonRun.error_message !== run?.error_message ? (
+                                            <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded p-3 break-words">
+                                              {jsonRun.error_message}
+                                            </div>
+                                          ) : null}
+                                        </div>
+                                      ) : null}
                                     </div>
                                   );
                                 })()

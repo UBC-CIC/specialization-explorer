@@ -31,6 +31,8 @@ coverage/
 # Python
 venv/
 .ipynb_checkpoints/
+__pycache__/
+*.py[cod]
 
 # IDE
 .vscode-test/

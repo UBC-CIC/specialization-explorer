@@ -1,14 +1,13 @@
+import type { SignInOutput } from "aws-amplify/auth";
+
 export interface AuthResult {
   success: boolean;
   error?: string;
 }
 
-export interface SignInResult extends AuthResult {
-  isSignedIn?: boolean;
-  nextStep?: {
-    signInStep: string;
-  };
-}
+export type SignInResult =
+  | ({ success: true; error?: undefined } & SignInOutput)
+  | { success: false; error?: string };
 
 export interface UserResult extends AuthResult {
   user?: any;

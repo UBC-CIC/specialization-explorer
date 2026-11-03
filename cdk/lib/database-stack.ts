@@ -1,4 +1,4 @@
-import { Stack, StackProps, RemovalPolicy, SecretValue } from "aws-cdk-lib";
+import { Stack, StackProps, RemovalPolicy, SecretValue, Token } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { Duration } from "aws-cdk-lib";
 
@@ -127,20 +127,27 @@ export class DatabaseStack extends Stack {
       performanceInsightRetention: rds.PerformanceInsightRetention.DEFAULT,
       autoMinorVersionUpgrade: true,
       backupRetention: Duration.days(7),
-      deleteAutomatedBackups: true,
+      // Keep the automated backups if the instance is deleted, so it can still be restored
+      deleteAutomatedBackups: false,
       deletionProtection: true,
       databaseName: "specEx",
       publiclyAccessible: false,
+      // Send the engine and upgrade logs to CloudWatch; the retention below applies to these groups
+      cloudwatchLogsExports: ["postgresql", "upgrade"],
       cloudwatchLogsRetention: logs.RetentionDays.THREE_MONTHS,
       storageEncrypted: true, // storage encryption at rest
       monitoringInterval: Duration.seconds(60), // enhanced monitoring interval
       parameterGroup: parameterGroup,
     });
 
-    // Database clients (application functions, the initializer, secret rotation and the proxy)
-    // run in the private and isolated subnets only, so only those ranges are allowed in.
-    // Public subnets get no path to the database.
+    // The instance admits only named security groups: the proxy (below), the secret rotation
+    // functions (after the rotation schedules) and the database initializer (DBFlow stack).
+    // Application functions reach the database through the proxy, so no subnet range is
+    // allowed to the instance directly.
     const dbSecurityGroup = this.dbInstance.connections.securityGroups[0];
+
+    // Application functions run in the private and isolated subnets only, so only those
+    // ranges can reach the proxy. Public subnets get no path to the database.
     const privateSubnetCidrs: string[] =
       vpcStack.privateSubnetsCidrStrings &&
       vpcStack.privateSubnetsCidrStrings.length > 0
@@ -149,14 +156,6 @@ export class DatabaseStack extends Stack {
             ...vpcStack.vpc.privateSubnets,
             ...vpcStack.vpc.isolatedSubnets,
           ].map((subnet) => subnet.ipv4CidrBlock);
-
-    privateSubnetCidrs.forEach((cidr) => {
-      dbSecurityGroup.addIngressRule(
-        ec2.Peer.ipv4(cidr),
-        ec2.Port.tcp(5432),
-        `Allow PostgreSQL traffic from private subnet CIDR range ${cidr}`
-      );
-    });
 
     // The proxy has its own security group: clients reach the proxy, and only the proxy
     // is allowed through to the instance on behalf of them
@@ -234,29 +233,61 @@ export class DatabaseStack extends Stack {
     // The existing rotation schedule for secretPathAdmin will remain active.
 
     // 2. Rotation for application user credentials (multi-user strategy)
+    const appUserRotation = secretsmanager.HostedRotation.postgreSqlMultiUser({
+      vpc: vpcStack.vpc,
+      masterSecret: secretPathAdmin,
+      functionName: `${id}-AppUserRotation`,
+    });
     this.secretPathUser.addRotationSchedule("AppUserRot", {
       automaticallyAfter: Duration.days(30),
-      hostedRotation: secretsmanager.HostedRotation.postgreSqlMultiUser({
-        vpc: vpcStack.vpc,
-        masterSecret: secretPathAdmin,
-        functionName: `${id}-AppUserRotation`,
-      }),
+      hostedRotation: appUserRotation,
     });
 
     // 3. Rotation for table creator credentials (multi-user strategy)
+    const tableCreatorRotation = secretsmanager.HostedRotation.postgreSqlMultiUser({
+      vpc: vpcStack.vpc,
+      masterSecret: secretPathAdmin,
+      functionName: `${id}-TableCreatorRotation`,
+    });
     this.secretPathTableCreator.addRotationSchedule("TableCreatorRot", {
       automaticallyAfter: Duration.days(30),
-      hostedRotation: secretsmanager.HostedRotation.postgreSqlMultiUser({
-        vpc: vpcStack.vpc,
-        masterSecret: secretPathAdmin,
-        functionName: `${id}-TableCreatorRotation`,
-      }),
+      hostedRotation: tableCreatorRotation,
+    });
+
+    // The rotation functions log in as the admin user on the instance itself, not through
+    // the proxy, so each one's security group is allowed in. Their connections exist only
+    // after the rotation schedules above are created.
+    this.dbInstance.connections.allowDefaultPortFrom(
+      appUserRotation,
+      "Allow PostgreSQL traffic from the app user secret rotation function"
+    );
+    this.dbInstance.connections.allowDefaultPortFrom(
+      tableCreatorRotation,
+      "Allow PostgreSQL traffic from the table creator secret rotation function"
+    );
+
+    // The rotation functions and the proxy write to log groups their services create outside
+    // CloudFormation, so the retention is applied to the existing groups.
+    // RDS stores proxy names in lowercase, and the proxy's log group uses the stored name.
+    // The name CDK writes into the template is a plain string, so it can be lowercased here
+    // without changing the proxy itself.
+    const cfnProxyName = (rdsProxy.node.defaultChild as rds.CfnDBProxy).dbProxyName;
+    const proxyName = Token.isUnresolved(cfnProxyName) ? rdsProxy.dbProxyName : cfnProxyName.toLowerCase();
+    [
+      `/aws/lambda/${id}-AppUserRotation`,
+      `/aws/lambda/${id}-TableCreatorRotation`,
+      `/aws/rds/proxy/${proxyName}`,
+    ].forEach((logGroupName, index) => {
+      new logs.LogRetention(this, `${id}-ServiceLogRetention${index}`, {
+        logGroupName,
+        retention: logs.RetentionDays.ONE_MONTH,
+      });
     });
 
     // Note: AWS HostedRotation automatically creates and configures:
-    // - Rotation Lambda functions in the VPC
+    // - Rotation Lambda functions in the VPC, each with its own security group
     // - Required IAM permissions for Secrets Manager and RDS
-    // - Security group rules for database connectivity
     // - Multi-user strategy creates alternating users (A/B) for zero-downtime rotation
+    // The database ingress for those security groups is added above.
   }
 }

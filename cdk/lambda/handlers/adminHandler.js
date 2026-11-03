@@ -94,18 +94,11 @@ exports.handler = async (event) => {
   try {
     // Route requests based on HTTP method and URL path
     // event.httpMethod: GET, POST, PUT, DELETE
-    // event.resource: URL pattern like /admin/users or /admin/exampleEndpoint
+    // event.resource: URL pattern like /admin/users
     const pathData = event.httpMethod + " " + event.resource;
 
     // Handle different API endpoints using switch statement
     switch (pathData) {
-      // GET /admin/exampleEndpoint - Test endpoint for development and debugging
-      case "GET /admin/exampleEndpoint":
-        // Simple test response to verify Lambda function is working
-        data = "Example endpoint invoked";
-        response.body = JSON.stringify(data);
-        break;
-
       // POST /admin/promote_user - Record the caller as an administrator in the users table.
       // The caller is already in the Cognito admin group (enforced by the authorizer); the only
       // row this can change is the one for the caller's own verified Cognito address, so no
@@ -1033,8 +1026,12 @@ exports.handler = async (event) => {
           const limit = parseInt(qs.limit ?? "50", 10);
           const offset = parseInt(qs.offset ?? "0", 10);
 
+          // chat_number counts the user's sessions by creation (oldest = 1), matching the
+          // "Chat N" fallback label in the student sidebar. The window runs before
+          // LIMIT/OFFSET, so numbers stay correct across pages and activity re-sorting.
           const rows = await sqlConnection`
-            SELECT id, user_id, title, created_at, last_active_at
+            SELECT id, user_id, title, created_at, last_active_at,
+                   ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC)::int AS chat_number
             FROM chat_sessions
             WHERE user_id = ${userId}
             ORDER BY COALESCE(last_active_at, created_at) DESC

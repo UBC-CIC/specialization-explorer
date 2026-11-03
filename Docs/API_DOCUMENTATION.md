@@ -407,6 +407,7 @@ Generate an AI response for a message in a chat session.
 
 - `query` (string, required): The user's message
 - `user_id` (uuid, optional): User UUID
+- `message_id` (uuid, optional): Client-generated id saved as the user message's id. A request that repeats an id that is already saved returns `409` with `"error": "DUPLICATE_MESSAGE"` and is not answered again.
 
 **Response:**
 

@@ -8,6 +8,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as codeconnections from "aws-cdk-lib/aws-codeconnections";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as logs from "aws-cdk-lib/aws-logs";
 
 interface LambdaConfig {
   name: string; // Module name (e.g., "textGeneration")
@@ -48,10 +49,15 @@ export class CICDStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: [
           "lambda:GetFunction",
+          "lambda:GetFunctionConfiguration",
           "lambda:UpdateFunctionCode",
           "lambda:UpdateFunctionConfiguration",
+          "lambda:PublishVersion",
+          "lambda:GetAlias",
+          "lambda:UpdateAlias",
         ],
-        resources: lambdaUpdateArns,
+        // Qualified ARNs cover the published versions and the live alias
+        resources: [...lambdaUpdateArns, ...lambdaUpdateArns.map((arn) => `${arn}:*`)],
       })
     );
 
@@ -122,11 +128,23 @@ export class CICDStack extends cdk.Stack {
     props.lambdaFunctions.forEach((lambda) => {
       // Create ECR repository
       const repoName = `${id.toLowerCase()}-${lambda.name.toLowerCase()}`;
+      // Commit tags can never be overwritten, so a tag always names the image that was scanned.
+      // "latest" stays movable: the pipeline moves it to each image that passes the scan.
       const ecrRepo = new ecr.Repository(this, `${lambda.name}Repo`, {
         repositoryName: repoName,
-        imageTagMutability: ecr.TagMutability.MUTABLE,
+        imageTagMutability: ecr.TagMutability.IMMUTABLE_WITH_EXCLUSION,
+        imageTagMutabilityExclusionFilters: [
+          ecr.ImageTagMutabilityExclusionFilter.wildcard("latest"),
+        ],
         removalPolicy: cdk.RemovalPolicy.RETAIN,
         imageScanOnPush: true,
+        lifecycleRules: [
+          {
+            description: "Expire untagged images after 14 days",
+            tagStatus: ecr.TagStatus.UNTAGGED,
+            maxImageAge: cdk.Duration.days(14),
+          },
+        ],
       });
 
       ecrRepo.addToResourcePolicy(
@@ -227,8 +245,10 @@ export class CICDStack extends cdk.Stack {
               },
               build: {
                 commands: [
-                  'echo "Building Docker image..."',
-                  `docker build -t $REPOSITORY_URI:$IMAGE_TAG $CODEBUILD_SRC_DIR/${lambda.sourceDir} -f $CODEBUILD_SRC_DIR/${lambda.sourceDir}/Dockerfile`,
+                  // Commit tags are immutable, so a re-run for the same commit reuses its image
+                  'if aws ecr describe-images --repository-name $REPO_NAME --image-ids imageTag=$IMAGE_TAG >/dev/null 2>&1; then IMAGE_EXISTS=1; else IMAGE_EXISTS=0; fi',
+                  'if [ "$IMAGE_EXISTS" = "1" ]; then echo "Image $IMAGE_TAG already exists, reusing it"; docker pull $REPOSITORY_URI:$IMAGE_TAG; fi',
+                  `if [ "$IMAGE_EXISTS" = "0" ]; then echo "Building Docker image..."; docker build -t $REPOSITORY_URI:$IMAGE_TAG $CODEBUILD_SRC_DIR/${lambda.sourceDir} -f $CODEBUILD_SRC_DIR/${lambda.sourceDir}/Dockerfile; fi`,
                 ],
               },
               post_build: {
@@ -236,7 +256,7 @@ export class CICDStack extends cdk.Stack {
                   // post_build also runs after a failed build; there is nothing to publish then
                   'test "$CODEBUILD_BUILD_SUCCEEDING" = "1"',
                   // Only the commit-specific tag is pushed until the scan has passed
-                  "docker push $REPOSITORY_URI:$IMAGE_TAG",
+                  'if [ "$IMAGE_EXISTS" = "0" ]; then docker push $REPOSITORY_URI:$IMAGE_TAG; fi',
                   'echo "Waiting for vulnerability scan to complete..."',
                   "aws ecr wait image-scan-complete --repository-name $REPO_NAME --image-id imageTag=$IMAGE_TAG",
                   // Any failure to read the results fails the build; nothing here defaults to a pass
@@ -252,14 +272,27 @@ export class CICDStack extends cdk.Stack {
                   "docker push $REPOSITORY_URI:latest",
                   "export IMAGE_TAG",
                   'echo "Checking if Lambda function exists before updating..."',
-                  // The function is pointed at the verified, commit-specific tag
+                  // The function is pointed at the verified, commit-specific tag and published as
+                  // a new version; the "live" alias then moves to it, and the log prints the command
+                  // that moves the alias back to the previous version
                   `bash -c '
-                    if aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME &>/dev/null; then
-                      echo "Updating Lambda function to use the new image..."
-                      aws lambda update-function-code                         --function-name $LAMBDA_FUNCTION_NAME                         --image-uri $REPOSITORY_URI:$IMAGE_TAG
-                    else
+                    set -e
+                    if ! aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME &>/dev/null; then
                       echo "Lambda function $LAMBDA_FUNCTION_NAME does not exist yet. Skipping update."
+                      exit 0
                     fi
+                    echo "Updating Lambda function to use the new image..."
+                    aws lambda update-function-code --function-name $LAMBDA_FUNCTION_NAME --image-uri $REPOSITORY_URI:$IMAGE_TAG > /dev/null
+                    aws lambda wait function-updated --function-name $LAMBDA_FUNCTION_NAME
+                    NEW_VERSION=$(aws lambda publish-version --function-name $LAMBDA_FUNCTION_NAME --description "$IMAGE_TAG" --query Version --output text)
+                    echo "Published version $NEW_VERSION for $IMAGE_TAG"
+                    if ! PREVIOUS_VERSION=$(aws lambda get-alias --function-name $LAMBDA_FUNCTION_NAME --name live --query FunctionVersion --output text 2>/dev/null); then
+                      echo "Alias live does not exist yet; it is created by the next CDK deployment."
+                      exit 0
+                    fi
+                    aws lambda update-alias --function-name $LAMBDA_FUNCTION_NAME --name live --function-version $NEW_VERSION > /dev/null
+                    echo "Alias live moved from version $PREVIOUS_VERSION to $NEW_VERSION"
+                    echo "Rollback: aws lambda update-alias --function-name $LAMBDA_FUNCTION_NAME --name live --function-version $PREVIOUS_VERSION"
                   '`,
                 ],
               },
@@ -269,6 +302,12 @@ export class CICDStack extends cdk.Stack {
       );
 
       this.buildProjects[lambda.name] = buildProject;
+
+      // CodeBuild creates this log group on its first build, outside CloudFormation
+      new logs.LogRetention(this, `${lambda.name}BuildLogRetention`, {
+        logGroupName: `/aws/codebuild/${buildProject.projectName}`,
+        retention: logs.RetentionDays.ONE_MONTH,
+      });
 
 
       // Add build action to the list

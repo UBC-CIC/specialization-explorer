@@ -134,7 +134,10 @@ def start_ingestion_job(event, body, connection, kb_id, acting_user):
                 },
             )
 
-        if queued_count == 0:
+        if website_started.get("failed_count"):
+            # Websites that cannot fit the web crawler were marked failed with the reason
+            error = website_started["message"]
+        elif queued_count == 0:
             error = "No pending or queued data sources found to sync."
         else:
             error = "Pending data sources were queued, but no eligible batch could be started."

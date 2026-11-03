@@ -95,11 +95,6 @@ exports.handler = async (event) => {
     const pathData = event.httpMethod + " " + event.resource;
 
     switch (pathData) {
-      case "GET /user/exampleEndpoint":
-        data = "Example endpoint invoked";
-        response.body = JSON.stringify(data);
-        break;
-
       case "POST /user": {
         const body = parseBody(event.body);
         if (!body || typeof body !== "object" || Array.isArray(body)) {

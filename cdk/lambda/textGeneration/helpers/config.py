@@ -36,6 +36,11 @@ MAX_CHARACTERS_PER_AI_MESSAGE = 5000
 # Bedrock Configuration
 SEARCH_TYPE = "HYBRID"
 MAX_TOKENS = 4000
+# The HTTP fallback is synchronous and API Gateway REST integrations time out at 29 seconds.
+# Retrieval, the query rewrite and the verifier take several seconds, so the answer is capped
+# at about the length of MAX_CHARACTERS_PER_AI_MESSAGE (5000 characters is roughly 1250 tokens).
+# https://docs.aws.amazon.com/apigateway/latest/developerguide/limits.html
+HTTP_FALLBACK_MAX_TOKENS = 1200
 TEMPERATURE = 0.15
 TOP_P = 0.5
 

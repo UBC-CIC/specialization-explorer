@@ -2,6 +2,7 @@ import { Stack, StackProps } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+import * as logs from "aws-cdk-lib/aws-logs";
 import { Fn } from "aws-cdk-lib";
 import {
   AwsCustomResource,
@@ -17,7 +18,7 @@ export class VpcStack extends Stack {
   constructor(
     scope: Construct,
     id: string,
-    props: StackProps & { stackPrefix: string }
+    props: StackProps & { stackPrefix: string; environmentName?: string }
   ) {
     super(scope, id, props);
     const existingVpcId: string = ""; // CHANGE IF DEPLOYING WITH EXISTING VPC
@@ -217,19 +218,10 @@ export class VpcStack extends Stack {
         privateDnsEnabled: true,
       });
 
-      this.vpc.addInterfaceEndpoint("RDS Endpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.RDS,
-        subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-        privateDnsEnabled: true,
-      });
+      // No RDS interface endpoint: it only serves the RDS management API, which nothing calls
+      // at runtime. Database traffic goes to RDS Proxy inside the VPC and does not use it.
 
-      this.vpc.addFlowLog(`${id}-vpcFlowLog`);
-
-      // Add DynamoDB gateway endpoint
-      this.vpc.addGatewayEndpoint(`${id}-DynamoDB Endpoint`, {
-        service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
-        subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
-      });
+      this.setFlowLogRetention(this.vpc.addFlowLog(`${id}-vpcFlowLog`), props.environmentName);
 
       // Add S3 gateway endpoint
       this.vpc.addGatewayEndpoint(`${id}-S3 Endpoint`, {
@@ -270,7 +262,7 @@ export class VpcStack extends Stack {
         ],
       });
 
-      this.vpc.addFlowLog("specEx-vpcFlowLog");
+      this.setFlowLogRetention(this.vpc.addFlowLog("specEx-vpcFlowLog"), props.environmentName);
 
       // Add secrets manager endpoint to VPC
       this.vpc.addInterfaceEndpoint(`${id}-Secrets Manager Endpoint`, {
@@ -278,20 +270,9 @@ export class VpcStack extends Stack {
         subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       });
 
-      // Add RDS endpoint to VPC
-      this.vpc.addInterfaceEndpoint(`${id}-RDS Endpoint`, {
-        service: ec2.InterfaceVpcEndpointAwsService.RDS,
-        subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-      });
-
-      // Add DynamoDB gateway endpoint
-      this.vpc.addGatewayEndpoint(`${id}-DynamoDB Endpoint`, {
-        service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
-        subnets: [
-          { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-          { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-        ],
-      });
+      // No RDS interface endpoint: it only serves the RDS management API, which nothing calls
+      // at runtime. Database traffic goes to RDS Proxy inside the VPC and does not use it.
+      // Any management call (for example from the hosted rotation functions) leaves through NAT.
 
       // Add S3 gateway endpoint
       this.vpc.addGatewayEndpoint(`${id}-S3 Endpoint`, {
@@ -301,6 +282,15 @@ export class VpcStack extends Stack {
           { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
         ],
       });
+    }
+  }
+
+  // Flow logs keep 90 days in dev; other environments keep CDK's two-year default
+  private setFlowLogRetention(flowLog: ec2.FlowLog, environmentName?: string) {
+    if ((environmentName ?? "dev") !== "dev") return;
+    const logGroup = flowLog.node.tryFindChild("LogGroup");
+    if (logGroup instanceof logs.LogGroup) {
+      (logGroup.node.defaultChild as logs.CfnLogGroup).retentionInDays = logs.RetentionDays.THREE_MONTHS;
     }
   }
 }

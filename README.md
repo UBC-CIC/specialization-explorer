@@ -144,7 +144,7 @@ Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION
 
 ### Backend
 
-- **AWS Lambda** (Python 3.12 and Node.js 22) for serverless compute
+- **AWS Lambda** (Python 3.12 and Node.js 24) for serverless compute
 - **Amazon Bedrock** for LLM inference — Claude Haiku 5.5 and Claude Sonnet 5.5 (Anthropic)
 - **Amazon Bedrock Knowledge Base** with **Cohere Embed English v3** for vector embeddings
 - **Amazon OpenSearch Serverless** for vector storage and similarity search

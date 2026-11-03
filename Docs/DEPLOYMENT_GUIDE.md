@@ -635,8 +635,13 @@ To create an admin user for accessing the admin dashboard:
 8. After creation, select the user and click "Add user to group"
 9. Select the "admin" group
 10. Open the web app and add `/admin/login` to the end of the URL, then sign in with the email and temporary password. You'll be prompted to set a new password on first login.
+11. Set up an authenticator app (for example Microsoft Authenticator, Google Authenticator or 1Password). The login page shows a setup key, and a link that opens the app on a phone. Enter the 6-digit code from the app to finish signing in.
 
-After the first sign-in, the mode dropdown appears in the top right of the header, so the administrator can switch between the student and administrator views. Further administrators are created the same way. Administrators can optionally enroll an authenticator app (TOTP) for MFA.
+MFA is required: every later sign-in asks for a code from the authenticator app. If an administrator loses their authenticator app, an AWS administrator can reset it by running `aws cognito-idp admin-set-user-mfa-preference --user-pool-id <POOL-ID> --username <EMAIL> --software-token-mfa-settings Enabled=false,PreferredMfa=false`; the administrator then enrolls a new app at their next sign-in.
+
+The user pool uses the Cognito Plus feature plan for threat protection in full-function mode. Sign-ins with passwords found in known credential leaks are blocked, and high-risk sign-ins are blocked. The admin login uses SRP, so the password is not sent to Cognito. The Plus plan is billed per monthly active user; see [Amazon Cognito pricing](https://aws.amazon.com/cognito/pricing/).
+
+After the first sign-in, the mode dropdown appears in the top right of the header, so the administrator can switch between the student and administrator views. Further administrators are created the same way.
 
 ### Step 3: Visit Web App
 
@@ -769,8 +774,13 @@ To take down the deployed stack for a fresh redeployment in the future, follow t
    - Click "Continue" and then "Modify DB instance"
    - Wait for the modification to complete before proceeding
 
-2. **Delete CloudFormation Stacks:**
+2. **Disable Cognito Deletion Protection** (only if you want to delete the user pool in step 8):
+   - Navigate to **Amazon Cognito** → User pools → `<STACK-PREFIX>-UserPool`
+   - Open the **Settings** tab, edit **Deletion protection**, and turn it off
+
+3. **Delete CloudFormation Stacks:**
    Navigate to AWS CloudFormation console and delete stacks in this order:
+   - `<STACK-PREFIX>-Backup`
    - `<STACK-PREFIX>-Amplify`
    - `<STACK-PREFIX>-CICD`
    - `<STACK-PREFIX>-Api`
@@ -779,14 +789,14 @@ To take down the deployed stack for a fresh redeployment in the future, follow t
    - `<STACK-PREFIX>-Database`
    - `<STACK-PREFIX>-VpcStack`
 
-3. **Delete Secrets:**
+4. **Delete Secrets:**
    - Navigate to AWS Secrets Manager
    - Delete the following secrets:
      - `github-personal-access-token`
      - `SpecExSecrets`
      - Any database credentials created by the stack
 
-4. **Delete SSM Parameters:**
+5. **Delete SSM Parameters:**
    - Navigate to AWS Systems Manager → Parameter Store
    - Delete the following parameters:
      - `specEx-owner-name`
@@ -795,17 +805,24 @@ To take down the deployed stack for a fresh redeployment in the future, follow t
      - `/SpecEx/LLM/SonnetArn`
      - `/SpecEx/API/AllowedOrigins`
 
-5. **Delete ECR Repositories** (if any were created):
+6. **Delete ECR Repositories** (if any were created):
    - Navigate to Amazon ECR
    - Delete repositories created by the stack (e.g. `<STACK-PREFIX>-vectorindexmanagersigv4`)
 
-6. **Delete Knowledge Base Resources** (if not removed by CloudFormation):
+7. **Delete Knowledge Base Resources** (if not removed by CloudFormation):
    - Navigate to **Amazon Bedrock** → Knowledge Bases
    - Delete the knowledge base created by the stack
    - Navigate to **Amazon OpenSearch Serverless** → Collections
    - Delete the collection created by the stack
 
-7. **Verify Cleanup**:
+8. **Delete Retained Data** (only if the data is no longer needed; this cannot be undone):
+   Stack deletion keeps these resources so users, chats and documents survive an accidental delete:
+   - **Cognito:** the `<STACK-PREFIX>-UserPool` user pool (turn off deletion protection first, step 2)
+   - **S3:** the bucket whose name starts with the first six characters of the stack prefix in lowercase, followed by `-kb-documents` (empty all object versions, then delete it)
+   - **RDS:** the final snapshot and retained automated backups under **Snapshots** and **Automated backups → Retained**
+   - **AWS Backup:** the recovery points in the `<STACK-PREFIX>-Backup-Vault` vault, then the vault itself
+
+9. **Verify Cleanup**:
    - Check CloudWatch Logs for any remaining log groups
    - Check Lambda functions for any remaining functions
    - Check API Gateway for any remaining APIs
@@ -815,6 +832,7 @@ To take down the deployed stack for a fresh redeployment in the future, follow t
 **Cost Warning:** Ensure all resources are deleted to avoid ongoing charges. Pay special attention to:
 
 - RDS instances
+- Retained RDS snapshots and automated backups, and AWS Backup recovery points
 - NAT Gateways
 - Elastic IPs
 - S3 storage
