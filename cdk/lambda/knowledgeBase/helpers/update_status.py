@@ -361,8 +361,10 @@ def _remove_seed_url_from_bedrock_web_data_source(
         "dataSourceId": data_source["dataSourceId"],
         "name": data_source["name"],
         "dataSourceConfiguration": updated_data_source_config,
-        "vectorIngestionConfiguration": data_source["vectorIngestionConfiguration"],
     }
+
+    if data_source.get("vectorIngestionConfiguration"):
+        kwargs["vectorIngestionConfiguration"] = data_source["vectorIngestionConfiguration"]
 
     if data_source.get("description"):
         kwargs["description"] = data_source["description"]

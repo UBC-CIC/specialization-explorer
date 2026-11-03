@@ -476,8 +476,10 @@ def _update_existing_web_data_source(data_source: dict, knowledge_base_id: str, 
         "dataSourceId": data_source["dataSourceId"],
         "name": data_source["name"],
         "dataSourceConfiguration": updated_data_source_config,
-        "vectorIngestionConfiguration": data_source["vectorIngestionConfiguration"],
     }
+
+    if data_source.get("vectorIngestionConfiguration"):
+        kwargs["vectorIngestionConfiguration"] = data_source["vectorIngestionConfiguration"]
 
     if data_source.get("description"):
         kwargs["description"] = data_source["description"]
@@ -530,7 +532,7 @@ def _build_new_web_data_source_payload(template_data_source: dict, new_urls: lis
             "Mozilla/5.0 (compatible; SpecExKnowledgeBaseCrawler/1.0; +https://example.com/bot)"
         )
 
-    return {
+    payload = {
         "name": f"web-crawler-{uuid4().hex[:8]}",
         "dataSourceConfiguration": {
             "type": "WEB",
@@ -543,8 +545,12 @@ def _build_new_web_data_source_payload(template_data_source: dict, new_urls: lis
                 },
             },
         },
-        "vectorIngestionConfiguration": template_data_source["vectorIngestionConfiguration"],
     }
+
+    if template_data_source.get("vectorIngestionConfiguration"):
+        payload["vectorIngestionConfiguration"] = template_data_source["vectorIngestionConfiguration"]
+
+    return payload
 
 
 def _create_new_web_data_source(template_data_source: dict, knowledge_base_id: str, new_urls: list[str], include_patterns: list[str], exclude_patterns: list[str]) -> dict:
@@ -559,13 +565,17 @@ def _create_new_web_data_source(template_data_source: dict, knowledge_base_id: s
         exclude_patterns=exclude_patterns,
     )
 
-    resp = bedrock_agent.create_data_source(
-        knowledgeBaseId=knowledge_base_id,
-        name=payload["name"],
-        dataSourceConfiguration=payload["dataSourceConfiguration"],
-        vectorIngestionConfiguration=payload["vectorIngestionConfiguration"],
-        description=f"Auto-created web crawler for {', '.join(new_urls[:2])}",
-    )
+    create_kwargs = {
+        "knowledgeBaseId": knowledge_base_id,
+        "name": payload["name"],
+        "dataSourceConfiguration": payload["dataSourceConfiguration"],
+        "description": f"Auto-created web crawler for {', '.join(new_urls[:2])}",
+    }
+
+    if payload.get("vectorIngestionConfiguration"):
+        create_kwargs["vectorIngestionConfiguration"] = payload["vectorIngestionConfiguration"]
+
+    resp = bedrock_agent.create_data_source(**create_kwargs)
     return resp["dataSource"]
 
 

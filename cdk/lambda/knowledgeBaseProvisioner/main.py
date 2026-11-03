@@ -80,15 +80,25 @@ def _web_data_source_configuration(src):
 def _vector_ingestion_configuration(chunking):
     """Map a chunking spec to a Bedrock vectorIngestionConfiguration.
 
-    Returns None to omit the parameter entirely, which makes Bedrock apply its
-    default chunking (used by the 'DEFAULT' strategy).
+    The 'DEFAULT' strategy returns Bedrock's default fixed-size chunking set
+    explicitly, so every created data source carries a vectorIngestionConfiguration
+    (downstream code reads this field directly). Returns None only when no spec is
+    given at all.
     """
     if not chunking:
         return None
     strategy = (chunking.get('strategy') or 'DEFAULT').upper()
 
     if strategy == 'DEFAULT':
-        return None
+        return {
+            'chunkingConfiguration': {
+                'chunkingStrategy': 'FIXED_SIZE',
+                'fixedSizeChunkingConfiguration': {
+                    'maxTokens': 300,
+                    'overlapPercentage': 20,
+                }
+            }
+        }
     if strategy == 'NONE':
         return {'chunkingConfiguration': {'chunkingStrategy': 'NONE'}}
     if strategy == 'HIERARCHICAL':
