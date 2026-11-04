@@ -132,7 +132,8 @@ def handler(event, context=None):
     
     try:
         # Scheduler polling path
-        if event.get("task") == "poll_ingestion_run":
+        # API Gateway events carry a requestContext; only a direct scheduler invocation does not
+        if event.get("task") == "poll_ingestion_run" and "requestContext" not in event:
             try:
                 connection = _connect_to_db()
             except Exception as e:

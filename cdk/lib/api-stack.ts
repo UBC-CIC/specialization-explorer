@@ -1458,7 +1458,7 @@ export class ApiGatewayStack extends cdk.Stack {
           "scheduler:GetSchedule",
         ],
         resources: [
-          `arn:aws:scheduler:${this.region}:${this.account}:schedule/default/*`,
+          `arn:aws:scheduler:${this.region}:${this.account}:schedule/default/kb-*`,
         ],
       })
     );
@@ -1466,7 +1466,12 @@ export class ApiGatewayStack extends cdk.Stack {
     // EventBridge Scheduler role to invoke this Lambda function
     const schedulerInvokeRole = new iam.Role(this, `${id}-schedulerInvokeRole`, {
       roleName: `${id}-schedulerInvokeRole`,
-      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
+      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com").withConditions({
+        StringEquals: { "aws:SourceAccount": this.account },
+        ArnLike: {
+          "aws:SourceArn": `arn:aws:scheduler:${this.region}:${this.account}:schedule/default/kb-*`,
+        },
+      }),
     });
 
     schedulerInvokeRole.addToPolicy(

@@ -476,18 +476,7 @@ def update_status(event, connection):
         return _response(
             event,
             400,
-            {
-                "error": "Missing required scheduler payload fields",
-                "received": {
-                    "knowledge_base_id": kb_id,
-                    "phase": phase,
-                    "sync_session_id": sync_session_id,
-                    "bedrock_data_source_id": bedrock_data_source_id,
-                    "bedrock_ingestion_job_id": bedrock_ingestion_job_id,
-                    "db_ingestion_run_ids": db_ingestion_run_ids,
-                    "schedule_name": schedule_name,
-                },
-            },
+            {"error": "Missing required scheduler payload fields"},
         )
 
     resp = bedrock_agent.get_ingestion_job(
