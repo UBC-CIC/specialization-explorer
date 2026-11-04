@@ -1475,8 +1475,11 @@ export class ApiGatewayStack extends cdk.Stack {
       roleName: `${id}-schedulerInvokeRole`,
       assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com").withConditions({
         StringEquals: { "aws:SourceAccount": this.account },
-        ArnLike: {
-          "aws:SourceArn": `arn:aws:scheduler:${this.region}:${this.account}:schedule/default/kb-*`,
+        // aws:SourceArn must be a schedule group ARN, not a schedule or name prefix, or
+        // CreateSchedule fails with "must allow AWS EventBridge Scheduler to assume the role".
+        // https://docs.aws.amazon.com/scheduler/latest/UserGuide/cross-service-confused-deputy-prevention.html
+        ArnEquals: {
+          "aws:SourceArn": `arn:aws:scheduler:${this.region}:${this.account}:schedule-group/default`,
         },
       }),
     });
