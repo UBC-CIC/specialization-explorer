@@ -557,8 +557,11 @@ def update_status(event, connection):
     next_step = None
 
     try:
-        # A COMPLETE job can still have failed documents. Each reason goes only to the run whose
-        # file or website it names, so one bad page does not mark the whole batch with errors.
+        # A COMPLETE job can still have failed documents. Each reason is attached only to the
+        # run whose file or website it names, so one bad page does not mark the whole batch with
+        # errors. Reasons that name another seed's page, and reasons Bedrock did not itemize
+        # (it truncates the failure list when there are many), are logged only -- never smeared
+        # onto unrelated runs in this batch. A run with no failures of its own stays clean.
         attributed_runs = {}
         if normalized_status == "completed" and (failed_document_count or failure_reasons):
             attributed_runs, unmatched_reasons, named_document_count = _attribute_document_failures(
@@ -566,21 +569,16 @@ def update_status(event, connection):
                 ingestion_run_ids=db_ingestion_run_ids,
                 failure_reasons=failure_reasons,
             )
-            if named_document_count >= failed_document_count:
-                # Every failed document is named, so what is left belongs to other sources on the
-                # same crawler or is a job-level notice (Bedrock adds a generic "internal error"
-                # even to clean crawls). Log it rather than attach it to this batch's runs.
-                if unmatched_reasons:
-                    logger.info(
-                        "Ingestion job %s reasons not attached to this batch's runs: %s",
-                        bedrock_ingestion_job_id,
-                        "; ".join(unmatched_reasons),
-                    )
-                error_message = None
-            else:
-                # Some failed documents are not named at all, so every other run keeps the
-                # unmatched reasons rather than hiding a failure.
-                error_message = "; ".join(unmatched_reasons) if unmatched_reasons else None
+            if unmatched_reasons:
+                logger.info(
+                    "Ingestion job %s reasons not attached to this batch's runs "
+                    "(itemized %d of %d failed documents): %s",
+                    bedrock_ingestion_job_id,
+                    named_document_count,
+                    failed_document_count,
+                    "; ".join(unmatched_reasons),
+                )
+            error_message = None
 
         rows_updated = 0
         for run_id, entry in attributed_runs.items():
