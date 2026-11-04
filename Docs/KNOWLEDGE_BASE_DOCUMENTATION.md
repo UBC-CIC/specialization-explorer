@@ -642,13 +642,15 @@ The selected batch size depends on crawler capacity:
 
 ### Crawler seed URL limits
 
-Bedrock rejects a web crawler update with more than 100 seed URLs (`MAX_SEED_URLS`), or with seed URLs whose combined length is 3,000 characters or more (`MAX_SEED_URL_CHARS` is 2,999). Before updating the crawler, `_plan_website_batch` checks each queued website against the room left on it:
+Bedrock rejects a web crawler update with more than 100 seed URLs (`MAX_SEED_URLS`), or with seed URLs whose combined length is 3,000 characters or more (`MAX_SEED_URL_CHARS` is 2,999). `_select_crawler_for_batch` tries the available crawlers in order of most remaining pages and picks the first one with seed URL room for at least one queued website. `_plan_website_batch` then checks each queued website against the room left on that crawler:
 
 * Websites that fit are batched as described above.
-* Websites that do not fit are marked `failed` with a "web crawler is full" message, so they do not stay `queued` and block every later sync. Room only shrinks as batches are added, so a website that does not fit now never will on that crawler.
+* A website whose URL is already a seed on a crawler is only re-crawled on that crawler, so the same site is never ingested by two crawlers. If that crawler is busy, the website stays `queued` until its current job finishes.
+* Websites that fit no crawler (available or busy) are marked `failed` with an "every web crawler is full" message listing each crawler's URL count and length, so they do not stay `queued` and block every later sync. Room only shrinks as batches are added, so a website that fits no crawler now never will.
+* Websites that fit only a busy crawler stay `queued` until its current job finishes.
 * If Bedrock still rejects the update with a `ValidationException` (for example a limit the code does not check), the batch is marked `failed` with Bedrock's reason.
 
-Since September 30, 2026, Bedrock no longer allows new Web Crawler connectors on customer-managed knowledge bases ([Bedrock docs](https://docs.aws.amazon.com/bedrock/latest/userguide/webcrawl-data-source-connector.html)). `NEW_WEB_CRAWLERS_SUPPORTED` is therefore `False`: the existing crawler is the only one, and when it is busy the queued websites wait for its current job instead of a new crawler being created.
+Since September 30, 2026, Bedrock no longer allows new Web Crawler connectors on customer-managed knowledge bases ([Bedrock docs](https://docs.aws.amazon.com/bedrock/latest/userguide/webcrawl-data-source-connector.html)). `NEW_WEB_CRAWLERS_SUPPORTED` is therefore `False`: queued websites are spread across the existing crawlers, and when none can take them now they wait for a busy crawler instead of a new crawler being created.
 
 To make room, remove websites from the crawler, replace several pages with a shorter parent URL (the default scope crawls every page under a seed's path), or upload the pages as Markdown files.
 

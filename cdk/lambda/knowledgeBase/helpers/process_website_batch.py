@@ -237,16 +237,62 @@ def _classify_data_source(data_source: dict, latest_job: dict | None) -> dict:
     }
 
 
-def _select_best_available(classified: list[dict]) -> dict | None:
-    """
-    Choose the best available web crawler for the next batch.
-    Preference is given to the crawler with the most remaining pages.
-    """
-    candidates = [x for x in classified if x["state"] == "available"]
-    if not candidates:
-        return None
+def _batch_size_for(crawler: dict) -> int:
+    """Use a batch of 1 on a crawler near its page limit, otherwise up to WEBSITE_BATCH_SIZE"""
+    if crawler["remaining_pages"] <= LOW_REMAINING_PAGES_THRESHOLD:
+        return 1
+    return WEBSITE_BATCH_SIZE
 
-    return sorted(candidates, key=lambda x: x["remaining_pages"], reverse=True)[0]
+
+def _url_fits(url: str, seed_urls: list[str]) -> bool:
+    """Return True when adding url keeps the crawler within its seed URL limits"""
+    existing = set(seed_urls)
+    if url in existing:
+        return True
+    return (
+        len(existing) + 1 <= MAX_SEED_URLS
+        and sum(len(x) for x in existing) + len(url) <= MAX_SEED_URL_CHARS
+    )
+
+
+def _home_crawler_ids(queued_websites: list[dict], open_crawlers: list[dict]) -> dict[str, str]:
+    """
+    Map each queued website run to the crawler that already has its URL as a seed.
+
+    A website already on a crawler is only re-crawled there, so the same site is never
+    added to a second crawler and ingested twice.
+    """
+    homes = {}
+    for run in queued_websites:
+        for crawler in open_crawlers:
+            if run["name"] in crawler["seed_urls"]:
+                homes[run["ingestion_run_id"]] = crawler["data_source_id"]
+                break
+    return homes
+
+
+def _select_crawler_for_batch(
+    available: list[dict],
+    queued_websites: list[dict],
+    homes: dict[str, str],
+) -> tuple[dict | None, list[dict]]:
+    """
+    Choose the available web crawler and website batch for the next update.
+
+    Crawlers are tried in order of most remaining pages, and the first one that can take
+    at least one queued website wins. A crawler is only offered websites that are not
+    already a seed on a different crawler. Picking by page room alone could choose a
+    crawler with no seed URL room left and fail websites another crawler could take.
+    """
+    for crawler in sorted(available, key=lambda x: x["remaining_pages"], reverse=True):
+        eligible = [
+            run for run in queued_websites
+            if homes.get(run["ingestion_run_id"], crawler["data_source_id"]) == crawler["data_source_id"]
+        ]
+        batch, _ = _plan_website_batch(eligible, _batch_size_for(crawler), crawler["seed_urls"])
+        if batch:
+            return crawler, batch
+    return None, []
 
 
 def _latest_run_rows_by_status(connection, *, status: str, data_source_type: str) -> list[dict]:
@@ -368,14 +414,18 @@ def _plan_website_batch(
     return batch, unfit
 
 
-def _crawler_full_message(seed_urls: list[str]) -> str:
-    """The error shown on a website that cannot be added to the web crawler"""
+def _crawler_full_message(crawlers: list[dict]) -> str:
+    """The error shown on a website that does not fit any web crawler"""
+    usage = "; ".join(
+        f"{c['name']} has {len(c['seed_urls'])} URLs totalling "
+        f"{sum(len(url) for url in c['seed_urls']):,} characters"
+        for c in crawlers
+    )
     return (
-        "Not added: the web crawler is full. Bedrock allows at most "
+        "Not added: every web crawler is full. Bedrock allows at most "
         f"{MAX_SEED_URLS} seed URLs per web crawler with a combined length under "
-        f"{MAX_SEED_URL_CHARS + 1:,} characters, and it has {len(seed_urls)} URLs totalling "
-        f"{sum(len(url) for url in seed_urls):,} characters. New web crawlers can no longer "
-        f"be created ({WEB_CRAWLER_DOCS_URL}). Remove websites from the crawler, use a "
+        f"{MAX_SEED_URL_CHARS + 1:,} characters ({usage}). New web crawlers can no longer "
+        f"be created ({WEB_CRAWLER_DOCS_URL}). Remove websites from a crawler, use a "
         "shorter parent URL that covers several pages, or upload the page as a Markdown file."
     )
 
@@ -682,12 +732,13 @@ def process_website_batch(event, connection, kb_id, sync_session_id: str, trigge
     This method:
     - fetches all Bedrock web crawlers in the knowledge base
     - classifies them by availability and remaining page capacity
-    - picks the best available crawler, if one exists
+    - picks the available crawler with the most remaining pages that has seed URL room
+      for at least one queued website (a website already on a crawler stays on it)
     - decides batch size:
       - 1 when the crawler is near the low remaining-pages threshold
       - otherwise up to 5
     - selects the next queued website batch with compatible filters that fits the
-      crawler's seed URL limits, and marks queued websites that cannot fit as failed
+      crawler's seed URL limits, and marks queued websites that fit no crawler as failed
     - updates an existing crawler or creates a new one
     - starts the Bedrock ingestion job
     - creates the 10-minute polling scheduler
@@ -716,16 +767,6 @@ def process_website_batch(event, connection, kb_id, sync_session_id: str, trigge
         latest_job = _get_latest_ingestion_job(kb_id, data_source["dataSourceId"])
         classified.append(_classify_data_source(data_source, latest_job))
 
-    selected = _select_best_available(classified)
-
-    if selected:
-        if selected["remaining_pages"] <= LOW_REMAINING_PAGES_THRESHOLD:
-            batch_size = 1
-        else:
-            batch_size = WEBSITE_BATCH_SIZE
-    else:
-        batch_size = WEBSITE_BATCH_SIZE
-
     queued_websites = _latest_run_rows_by_status(
         connection,
         status="queued",
@@ -740,18 +781,11 @@ def process_website_batch(event, connection, kb_id, sync_session_id: str, trigge
 
     can_create_crawler = NEW_WEB_CRAWLERS_SUPPORTED and len(web_crawlers) < MAX_WEB_DATA_SOURCES
 
-    if selected:
-        seed_urls = selected["seed_urls"]
-    elif can_create_crawler:
-        seed_urls = []
-    elif any(x["state"] == "syncing" for x in classified):
-        # The crawler is busy with another job; the running sync picks these up afterwards
-        return {
-            "started": False,
-            "phase": "website",
-            "message": "The web crawler is busy; queued websites will be added after its current job.",
-        }
-    else:
+    # Crawlers below their page limit; "syncing" ones can take websites after their current job
+    open_crawlers = [x for x in classified if x["state"] in ("available", "syncing")]
+    available = [x for x in open_crawlers if x["state"] == "available"]
+
+    if not open_crawlers and not can_create_crawler:
         # Every crawler has reached its page limit and no new one can be created
         error_message = (
             "Not added: the web crawler has reached its page limit and new web crawlers "
@@ -770,31 +804,53 @@ def process_website_batch(event, connection, kb_id, sync_session_id: str, trigge
             "message": f"{failed_count} queued websites could not be added: {error_message}",
         }
 
-    batch, unfit = _plan_website_batch(queued_websites, batch_size, seed_urls)
+    homes = _home_crawler_ids(queued_websites, open_crawlers)
+    selected, batch = _select_crawler_for_batch(available, queued_websites, homes)
+    batch_size = _batch_size_for(selected) if selected else WEBSITE_BATCH_SIZE
+
+    if not batch and can_create_crawler:
+        new_crawler_websites = [x for x in queued_websites if x["ingestion_run_id"] not in homes]
+        batch, _ = _plan_website_batch(new_crawler_websites, batch_size, [])
+
+    # A website fails only when no crawler can ever take it: capacity only shrinks as
+    # batches are added. Websites already on a crawler always fit there.
+    batch_ids = {x["ingestion_run_id"] for x in batch}
+    unfit = [
+        x for x in queued_websites
+        if x["ingestion_run_id"] not in batch_ids
+        and x["ingestion_run_id"] not in homes
+        and not (
+            _url_fits(x["name"], []) if can_create_crawler
+            else any(_url_fits(x["name"], c["seed_urls"]) for c in open_crawlers)
+        )
+    ]
 
     failed_count = 0
-    if unfit and not (selected and can_create_crawler):
+    if unfit:
         failed_count = _mark_runs_failed(
             connection,
             ingestion_run_ids=[x["ingestion_run_id"] for x in unfit],
-            error_message=_crawler_full_message(seed_urls),
+            error_message=_crawler_full_message(open_crawlers),
         )
         connection.commit()
-        logger.warning("Marked %d queued websites failed: web crawler is full", failed_count)
+        logger.warning("Marked %d queued websites failed: every web crawler is full", failed_count)
 
     if not batch:
+        messages = []
         if failed_count:
-            return {
-                "started": False,
-                "phase": "website",
-                "failed_count": failed_count,
-                "message": f"{failed_count} queued websites could not be added because the web crawler is full.",
-            }
-        return {
-            "started": False,
-            "phase": "website",
-            "message": "No queued website fits the web crawler.",
-        }
+            messages.append(
+                f"{failed_count} queued websites could not be added because every web crawler is full."
+            )
+        if failed_count < len(queued_websites):
+            if any(x["state"] == "syncing" for x in open_crawlers):
+                # The running job's completion calls this function again to place the rest
+                messages.append("The web crawler is busy; queued websites will be added after its current job.")
+            else:
+                messages.append("No queued website fits a web crawler.")
+        result = {"started": False, "phase": "website", "message": " ".join(messages)}
+        if failed_count:
+            result["failed_count"] = failed_count
+        return result
 
     urls = [x["name"] for x in batch]
     include_patterns = batch[0]["include_patterns"] or []
