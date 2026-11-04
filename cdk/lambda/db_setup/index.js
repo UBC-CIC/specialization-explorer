@@ -134,15 +134,15 @@ async function createAppUsers(
     DO $$
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${RW_NAME}') THEN
-        EXECUTE format('CREATE USER ${RW_NAME} WITH PASSWORD %L', '${rwPass}');
+        EXECUTE format('CREATE USER ${RW_NAME} WITH PASSWORD %L', current_setting('app.rw_pass'));
       ELSE
-        EXECUTE format('ALTER USER ${RW_NAME} WITH PASSWORD %L', '${rwPass}');
+        EXECUTE format('ALTER USER ${RW_NAME} WITH PASSWORD %L', current_setting('app.rw_pass'));
       END IF;
 
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${TC_NAME}') THEN
-        EXECUTE format('CREATE USER ${TC_NAME} WITH PASSWORD %L', '${tcPass}');
+        EXECUTE format('CREATE USER ${TC_NAME} WITH PASSWORD %L', current_setting('app.tc_pass'));
       ELSE
-        EXECUTE format('ALTER USER ${TC_NAME} WITH PASSWORD %L', '${tcPass}');
+        EXECUTE format('ALTER USER ${TC_NAME} WITH PASSWORD %L', current_setting('app.tc_pass'));
       END IF;
     END$$;
 
@@ -152,6 +152,12 @@ async function createAppUsers(
 
   await adminClient.query("BEGIN");
   try {
+    // Passwords are bound as parameters and read back via transaction-local
+    // settings, so they never appear in statement text or error output.
+    await adminClient.query(
+      "SELECT set_config('app.rw_pass', $1, true), set_config('app.tc_pass', $2, true)",
+      [rwPass, tcPass]
+    );
     await adminClient.query(sql);
     await adminClient.query("COMMIT");
   } catch (e) {
