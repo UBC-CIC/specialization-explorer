@@ -495,50 +495,6 @@ curl -X GET "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/user
 
 ---
 
-### Create Admin User
-
-Create a new admin user.
-
-**Endpoint:** `POST /admin/users`
-
-**Request Body:**
-
-```json
-{
-  "display_name": "Jane Smith",
-  "email": "jane.smith@example.com",
-  "institution_id": "ubc"
-}
-```
-
-**Parameters:**
-
-- `display_name` (string, required): Display name (max 255 chars)
-- `email` (string, required): Email address (max 255 chars)
-- `institution_id` (string, optional): Institution identifier
-
-**Response:**
-
-```json
-{
-  "id": "uuid",
-  "display_name": "Jane Smith",
-  "email": "jane.smith@example.com",
-  "role": "admin"
-}
-```
-
-**Example (cURL):**
-
-```bash
-curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/users" \
-  -H "Authorization: eyJraWQiOiJ..." \
-  -H "Content-Type: application/json" \
-  -d '{"display_name": "Jane Smith", "email": "jane.smith@example.com"}'
-```
-
----
-
 ### Register Calling Administrator
 
 Records the calling administrator in the users table with the `admin` role. The user is identified by the verified e-mail in the caller's Cognito ID token; the request takes no body, and no other user can be targeted. Each call is written to the audit log with the previous and new role.
@@ -731,7 +687,7 @@ curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/dat
 
 ### Generate Presigned Upload URL
 
-Generate an S3 presigned URL for uploading a single knowledge base file.
+Generate an S3 presigned POST for uploading a single knowledge base file. Upload with a `multipart/form-data` `POST` to `presignedUrl` containing every entry of `fields` followed by the file as the last field, named `file`. S3 rejects objects larger than 50 MB.
 
 **Endpoint:** `GET /admin/generate-presigned-url`
 
@@ -744,7 +700,8 @@ Generate an S3 presigned URL for uploading a single knowledge base file.
 
 ```json
 {
-  "presignedUrl": "https://s3.amazonaws.com/bucket/path?...",
+  "presignedUrl": "https://bucket.s3.region.amazonaws.com/",
+  "fields": { "Content-Type": "text/csv", "key": "...", "policy": "...", "x-amz-signature": "..." },
   "key": "quarantine/csv/1712345678_data.csv",
   "bucket": "my-kb-bucket"
 }
@@ -791,7 +748,8 @@ Generate presigned S3 upload URLs for multiple files in a single request. Use th
   "presigned_urls": [
     {
       "file_name": "alumni.csv",
-      "presigned_url": "https://s3.amazonaws.com/bucket/path?...",
+      "presigned_url": "https://bucket.s3.region.amazonaws.com/",
+      "fields": { "Content-Type": "text/csv", "key": "...", "policy": "...", "x-amz-signature": "..." },
       "key": "quarantine/csv/1712345678_alumni.csv",
       "bucket": "my-kb-bucket"
     }
@@ -801,6 +759,7 @@ Generate presigned S3 upload URLs for multiple files in a single request. Use th
 
 **Notes:**
 - Presigned URLs expire after 10 minutes
+- Each upload is a `multipart/form-data` `POST` with the returned `fields` followed by the file as the last field (`file`); S3 rejects objects larger than 50 MB
 - S3 uploads go directly to S3 and do not pass through WAF
 - Supported content types: `text/csv`, `text/markdown`, `application/json`, `text/json`, `application/octet-stream`
 

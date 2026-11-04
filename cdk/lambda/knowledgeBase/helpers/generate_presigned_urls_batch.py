@@ -14,6 +14,9 @@ REGION = os.environ["REGION"]
 
 MAX_FILES = 200  # cap per batch request
 
+# Largest object a presigned upload may carry; enforced by S3 through the signed POST policy
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
 ALLOWED_CONTENT_TYPES = {
     "text/csv",
     "text/markdown",
@@ -87,11 +90,15 @@ def generate_presigned_urls_batch(event, body):
         key = f"{prefix}/{timestamp}_{file_name}"
 
         try:
-            presigned_url = s3.generate_presigned_url(
-                ClientMethod="put_object",
-                Params={"Bucket": BUCKET, "Key": key, "ContentType": content_type},
+            presigned_post = s3.generate_presigned_post(
+                Bucket=BUCKET,
+                Key=key,
+                Fields={"Content-Type": content_type},
+                Conditions=[
+                    {"Content-Type": content_type},
+                    ["content-length-range", 0, MAX_UPLOAD_BYTES],
+                ],
                 ExpiresIn=600,  # 10 min — longer window for batch uploads
-                HttpMethod="PUT",
             )
         except Exception as e:
             logger.error("Error generating presigned URL for %s: %s", file_name, e, exc_info=True)
@@ -99,7 +106,8 @@ def generate_presigned_urls_batch(event, body):
 
         results.append({
             "file_name": file_name,
-            "presigned_url": presigned_url,
+            "presigned_url": presigned_post["url"],
+            "fields": presigned_post["fields"],
             "key": key,
             "bucket": BUCKET,
         })

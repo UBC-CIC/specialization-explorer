@@ -85,8 +85,12 @@ def stage_data_sources_batch(event, body, connection, acting_user):
                 continue
 
             try:
-                primary_approved_key = _approved_key_for(primary_s3_bucket, primary_s3_key)
-                metadata_approved_key = _approved_key_for(metadata_s3_bucket, metadata_s3_key)
+                primary_approved_key = _approved_key_for(
+                    primary_s3_bucket, primary_s3_key, primary_file_name, source_type
+                )
+                metadata_approved_key = _approved_key_for(
+                    metadata_s3_bucket, metadata_s3_key, metadata_file_name, "metadata"
+                )
             except InvalidUploadError as e:
                 errors.append({"index": i, "file": primary_file_name, "error": str(e)})
                 continue

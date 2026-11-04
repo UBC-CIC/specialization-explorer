@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List, Optional
 import helpers.config as config
 from helpers.aws_clients import get_bedrock_client
+from helpers.untrusted import escape_untrusted, truncate
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -16,11 +17,7 @@ def _normalize_ws(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
-def _truncate(text: str, limit: int = 12000) -> str:
-    text = text or ""
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n...[truncated {len(text) - limit} chars]..."
+_truncate = truncate
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -49,9 +46,7 @@ def _dedupe_reasons(reasons: List[Any]) -> List[str]:
 # -----------------------------
 # Prompt builder
 # -----------------------------
-def _escape_untrusted(text: str) -> str:
-    """Neutralise angle brackets so untrusted text cannot close or forge the delimiter tags."""
-    return (text or "").replace("<", "&lt;").replace(">", "&gt;")
+_escape_untrusted = escape_untrusted
 
 
 def _format_sources_for_verifier(sources: List[Dict[str, Any]], max_chars_per_source: int = 5000) -> str:

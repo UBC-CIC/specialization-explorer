@@ -8,6 +8,7 @@ import boto3
 
 from helpers.process_s3_batch import process_s3_batch
 from helpers.process_website_batch import process_website_batch
+from helpers.audit import audit_system_event
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -427,10 +428,15 @@ def _insert_retry_ingestion_run(
 
 def _delete_schedule(schedule_name: str):
     """Delete the polling scheduler once the current ingestion job is no longer running"""
-    scheduler_client.delete_schedule(
-        Name=schedule_name,
-        GroupName="default",
-    )
+    try:
+        scheduler_client.delete_schedule(
+            Name=schedule_name,
+            GroupName="default",
+        )
+    except Exception:
+        audit_system_event("scheduler.delete_schedule", "failed", {"schedule_name": schedule_name})
+        raise
+    audit_system_event("scheduler.delete_schedule", details={"schedule_name": schedule_name})
 
 def update_status(event, connection):
     """
@@ -622,6 +628,14 @@ def update_status(event, connection):
                         bedrock_data_source_id=bedrock_data_source_id,
                         website_url=website_url,
                     )
+                    audit_system_event(
+                        "bedrock.remove_crawler_seed",
+                        details={
+                            "bedrock_data_source_id": bedrock_data_source_id,
+                            "website_url": website_url,
+                            "sync_session_id": sync_session_id,
+                        },
+                    )
 
                     retry_run_id = _insert_retry_ingestion_run(
                         connection,
@@ -635,6 +649,18 @@ def update_status(event, connection):
     except Exception:
         connection.rollback()
         raise
+
+    audit_system_event(
+        "ingestion_runs.update_status",
+        details={
+            "status": normalized_status,
+            "phase": phase,
+            "sync_session_id": sync_session_id,
+            "db_ingestion_run_ids": db_ingestion_run_ids,
+            "bedrock_ingestion_job_id": bedrock_ingestion_job_id,
+            "retry_created_run_ids": retry_created_run_ids,
+        },
+    )
 
     try:
         _delete_schedule(schedule_name)

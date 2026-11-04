@@ -111,7 +111,7 @@ The Knowledge Base ingestion workflow is split across several helper modules.
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
 | `cdk/lambda/lambdaKnowledgeBase/main.py`                           | Main Lambda entry point. Routes API Gateway requests and scheduler events.                       |
 | `cdk/lambda/lambdaKnowledgeBase/helpers/cors.py`                   | Builds CORS response headers from the configured allowed origins.                                |
-| `cdk/lambda/lambdaKnowledgeBase/helpers/generate_presigned_url.py` | Creates short-lived S3 PUT URLs for admin uploads.                                               |
+| `cdk/lambda/lambdaKnowledgeBase/helpers/generate_presigned_url.py` | Creates short-lived S3 POST policies for admin uploads.                                            |
 | `cdk/lambda/lambdaKnowledgeBase/helpers/stage_data_sources.py`     | Validates and stages websites, CSV/JSON pairs, and Markdown/JSON pairs.                          |
 | `cdk/lambda/lambdaKnowledgeBase/helpers/start_ingestion_job.py`    | Starts a sync session by promoting pending runs to queued and starting the first eligible phase. |
 | `cdk/lambda/lambdaKnowledgeBase/helpers/process_s3_batch.py`       | Starts the S3 ingestion phase for queued CSV, Markdown, and JSON sources.                        |
@@ -131,7 +131,7 @@ The Lambda handles the following admin routes:
 
 | Method | Route                           | Handler                  | Purpose                                                               |
 | ------ | ------------------------------- | ------------------------ | --------------------------------------------------------------------- |
-| `GET`  | `/admin/generate-presigned-url` | `generate_presigned_url` | Create a presigned S3 PUT URL for an admin file upload.               |
+| `GET`  | `/admin/generate-presigned-url` | `generate_presigned_url` | Create a presigned S3 POST for an admin file upload.                 |
 | `POST` | `/admin/data_sources`           | `stage_data_sources`     | Stage a website, CSV/JSON pair, or Markdown/JSON pair.                |
 | `POST` | `/admin/data_sources/sync`      | `start_ingestion_job`    | Promote pending sources to queued and start the next ingestion phase. |
 
@@ -196,7 +196,7 @@ This means the dashboard is a latest-status view, not a full ingestion history v
 | UI Action                   | Backend Route                                                                  | Result                                                                                   |
 | --------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | Add Web URL                 | `POST /admin/data_sources`                                                     | Stages a website as `pending`.                                                           |
-| Add Data (CSV or Markdown)  | `GET /admin/generate-presigned-url`, S3 `PUT`, then `POST /admin/data_sources` | Uploads the primary file and metadata JSON, then stages both as `pending`.               |
+| Add Data (CSV or Markdown)  | `GET /admin/generate-presigned-url`, S3 `POST`, then `POST /admin/data_sources` | Uploads the primary file and metadata JSON, then stages both as `pending`.               |
 | Sync                        | `POST /admin/data_sources/sync`                                                | Promotes latest `pending` runs to `queued` and starts the next eligible ingestion phase. |
 | Refresh table after actions | `GET /admin/data_sources`                                                      | Reloads the data source table and latest run statuses.                                   |
 

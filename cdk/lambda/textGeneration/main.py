@@ -11,6 +11,8 @@ from helpers.db_connection import get_db_connection
 import helpers.config as config
 from helpers.session_security import validate_session_ownership, sanitize_session_id, session_exists
 from helpers.tracing import tracer
+from helpers.audit import audit_log
+from helpers.rate_limit import consume_rate_limit, RateLimitUnavailableError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -74,6 +76,7 @@ def handler(event, context=None):
     try:
         user_id = str(uuid.UUID(str(user_id)))
     except ValueError:
+        audit_log(event, 401)
         return {
             'statusCode': 401,
             'body': json.dumps({'error': 'Unauthorized'})
@@ -83,6 +86,13 @@ def handler(event, context=None):
         return {
             'statusCode': 400,
             'body': json.dumps({'error': 'Missing query or chat_session_id'})
+        }
+
+    # The database driver rejects NUL characters, which would fail the request after it is charged
+    if '\x00' in query:
+        return {
+            'statusCode': 400,
+            'body': json.dumps({'error': 'Query contains invalid characters'})
         }
 
     # Sanitize session ID before querying DB
@@ -103,15 +113,34 @@ def handler(event, context=None):
         # and nothing is written before ownership and the message quota are checked
         if not validate_session_ownership(conn, chat_session_id, user_id):
             if not session_exists(conn, chat_session_id):
+                audit_log(event, 404, details={'chat_session_id': chat_session_id})
                 return {
                     'statusCode': 404,
                     'body': json.dumps({'error': 'Chat session not found'})
                 }
+            audit_log(event, 403, details={'chat_session_id': chat_session_id, 'user_id': user_id})
             return {
                 'statusCode': 403,
                 'body': json.dumps({'error': 'Unauthorized access to chat session'})
             }
         
+        # The WebSocket default handler already counts its messages before invoking this function;
+        # requests without a connection come straight from API Gateway and are counted here
+        if not (event.get('requestContext') or {}).get('connectionId'):
+            try:
+                within_rate_limit = consume_rate_limit(user_id)
+            except RateLimitUnavailableError:
+                return {
+                    'statusCode': 503,
+                    'body': json.dumps({'error': 'Service temporarily unavailable'})
+                }
+            if not within_rate_limit:
+                audit_log(event, 429, details={'chat_session_id': chat_session_id, 'user_id': user_id})
+                return {
+                    'statusCode': 429,
+                    'body': json.dumps({'error': 'RATE_LIMITED', 'message': "You're sending messages too quickly. Please wait a minute and try again."})
+                }
+
         # Load dynamic configuration from DB (cached for config.CONFIG_REFRESH_SECONDS)
         with tracer.provider.in_subsegment("## load_config"):
             config.load_config(conn)

@@ -1,10 +1,12 @@
 import os
 import io
+import re
 import csv
 import json
 import logging
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 import boto3
 
@@ -49,6 +51,38 @@ def _response(event, status_code: int, body: dict):
     }
 
 
+MAX_WEBSITE_URL_LENGTH = 2048
+MAX_CRAWLER_PATTERNS = 20
+MAX_CRAWLER_PATTERN_LENGTH = 500
+_MATCH_ALL_PATTERNS = {"", ".*", ".+", "(.*)", "(.+)"}
+
+
+def _validate_website_request(name, include_patterns, exclude_patterns) -> str | None:
+    """Returns an error message when the website seed or crawler patterns are not acceptable."""
+    if not isinstance(name, str) or len(name) > MAX_WEBSITE_URL_LENGTH:
+        return "name must be an http(s) URL"
+    parsed = urlparse(name)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "name must be an http(s) URL"
+
+    for field, patterns in (("include_patterns", include_patterns), ("exclude_patterns", exclude_patterns)):
+        if len(patterns) > MAX_CRAWLER_PATTERNS:
+            return f"{field} may contain at most {MAX_CRAWLER_PATTERNS} patterns"
+        for pattern in patterns:
+            if not isinstance(pattern, str) or len(pattern) > MAX_CRAWLER_PATTERN_LENGTH:
+                return f"{field} must contain strings of at most {MAX_CRAWLER_PATTERN_LENGTH} characters"
+            try:
+                re.compile(pattern)
+            except re.error:
+                return f"{field} contains an invalid regular expression"
+
+    # A match-all include filter would widen the crawl of every seed on the shared crawler
+    for pattern in include_patterns:
+        if pattern.strip().removeprefix("^").removesuffix("$") in _MATCH_ALL_PATTERNS:
+            return "include_patterns must not match every URL"
+    return None
+
+
 def _is_markdown_file(file_name: str) -> bool:
     lower_name = file_name.lower()
     return lower_name.endswith(".md") or lower_name.endswith(".markdown")
@@ -82,8 +116,23 @@ def _assert_s3_object_exists(bucket: str, key: str) -> int:
     return s3_client.head_object(Bucket=bucket, Key=key)["ContentLength"]
 
 
-def _approved_key_for(bucket: str, key: str) -> str:
-    """The corpus key an uploaded object is promoted to; only presigned-upload keys qualify"""
+_UPLOAD_PREFIX_BY_KIND = {
+    "csv": QUARANTINE_PREFIX + "csv/",
+    "markdown": QUARANTINE_PREFIX + "markdown/",
+    "metadata": QUARANTINE_PREFIX + "json/",
+}
+_TIMESTAMP_PREFIX = re.compile(r"^\d+_")
+
+
+def _approved_key_for(bucket: str, key: str, file_name: str, kind: str) -> str:
+    """
+    The corpus key an uploaded object is promoted to; only presigned-upload keys qualify.
+
+    The object actually being promoted must be the one the request describes: it has to sit
+    under the quarantine folder minted for its kind ("csv", "markdown" or "metadata") and its
+    name, less the upload timestamp, has to be the declared file name, so the checks made on
+    the declared name apply to the stored object.
+    """
     if bucket != KB_BUCKET:
         raise InvalidUploadError("Files must be in the knowledge base bucket")
     if (
@@ -93,6 +142,11 @@ def _approved_key_for(bucket: str, key: str) -> str:
         or ".." in key.split("/")
     ):
         raise InvalidUploadError(f"Files must be uploaded with a presigned URL (key under {QUARANTINE_PREFIX})")
+
+    upload_prefix = _UPLOAD_PREFIX_BY_KIND[kind]
+    stored_name = key[len(upload_prefix):] if key.startswith(upload_prefix) else ""
+    if "/" in stored_name or _TIMESTAMP_PREFIX.sub("", stored_name, count=1) != os.path.basename(file_name).strip():
+        raise InvalidUploadError(f"The uploaded {kind} file does not match {file_name}")
     return APPROVED_PREFIX + key[len(QUARANTINE_PREFIX):]
 
 
@@ -369,6 +423,10 @@ def stage_data_sources(event, body, connection, acting_user):
             if not isinstance(exclude_patterns, list):
                 return _response(event, 400, {"error": "exclude_patterns must be an array"})
 
+            validation_error = _validate_website_request(name, include_patterns, exclude_patterns)
+            if validation_error:
+                return _response(event, 400, {"error": validation_error})
+
             existing_id = _existing_website_row_id(connection, name=name)
             if existing_id:
                 return _response(
@@ -449,8 +507,12 @@ def stage_data_sources(event, body, connection, acting_user):
             return _response(event, 400, {"error": pair_error})
 
         try:
-            primary_approved_key = _approved_key_for(primary_s3_bucket, primary_s3_key)
-            metadata_approved_key = _approved_key_for(metadata_s3_bucket, metadata_s3_key)
+            primary_approved_key = _approved_key_for(
+                primary_s3_bucket, primary_s3_key, primary_file_name, source_type
+            )
+            metadata_approved_key = _approved_key_for(
+                metadata_s3_bucket, metadata_s3_key, metadata_file_name, "metadata"
+            )
         except InvalidUploadError as e:
             return _response(event, 400, {"error": str(e)})
 
