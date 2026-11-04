@@ -3,6 +3,7 @@ import logging
 from typing import List, Dict, Any
 
 from helpers.aws_clients import get_bedrock_client
+from helpers.untrusted import escape_untrusted, truncate
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -60,10 +61,13 @@ def retrieve_documents(
         logger.error(f"Retrieval failed: {e}")
         return []
 
+MAX_CHARS_PER_SOURCE = 5000
+
 def format_context_for_prompt(sources: List[Dict[str, Any]]) -> str:
     if not sources:
         return "No specific documents found."
     context_str = ""
     for i, source in enumerate(sources, 1):
-        context_str += f"<source_{i}>\n{source['content']}\n</source_{i}>\n\n"
+        content = escape_untrusted(truncate(source.get("content") or "", MAX_CHARS_PER_SOURCE))
+        context_str += f"<source_{i}>\n{content}\n</source_{i}>\n\n"
     return context_str
