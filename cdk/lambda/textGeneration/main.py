@@ -28,9 +28,9 @@ def handler(event, context=None):
             logger.warning(f"Warm-up could not open a DB connection: {e}")
         return {'statusCode': 200}
 
-    # Log event but exclude body to prevent sensitive data exposure (user_id, chat_session_id)
-    safe_event = {k: v for k, v in event.items() if k != 'body'}
-    logger.info("Event: %s (body omitted)", json.dumps(safe_event))
+    # Body and headers are omitted: the headers carry the caller's bearer token
+    safe_event = {k: v for k, v in event.items() if k not in ('body', 'headers', 'multiValueHeaders')}
+    logger.info("Event: %s (body and headers omitted)", json.dumps(safe_event))
     
     body = {}
     if 'body' in event and event['body']:
