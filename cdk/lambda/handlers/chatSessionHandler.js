@@ -1,12 +1,15 @@
 const crypto = require("crypto");
 const { getCorsHeaders } = require("./utils/cors.js");
-const { validateUUID } = require("./utils/validation.js");
+const { validateUUID, sanitizeString } = require("./utils/validation.js");
 const { auditLog } = require("./utils/audit.js");
 const postgres = require("postgres");
 const {
   SecretsManagerClient,
   GetSecretValueCommand,
 } = require("@aws-sdk/client-secrets-manager");
+
+const MAX_TITLE_LENGTH = 200;
+const MAX_METADATA_LENGTH = 4096;
 
 let sqlConnection;
 const secretsManager = new SecretsManagerClient();
@@ -113,8 +116,20 @@ exports.handler = async (event) => {
         const body = parseBody(event.body);
         const userId = authenticatedUserId;
 
-        const title = body.title || null;
-        const metadata = body.metadata || {};
+        const title = sanitizeString(body.title, MAX_TITLE_LENGTH);
+        const metadata = body.metadata ?? {};
+
+        if (
+          typeof metadata !== "object" ||
+          Array.isArray(metadata) ||
+          JSON.stringify(metadata).length > MAX_METADATA_LENGTH
+        ) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({
+            error: `metadata must be an object of at most ${MAX_METADATA_LENGTH} characters`,
+          });
+          break;
+        }
 
         // Validate user exists
         const userExists = await sqlConnection`
@@ -156,7 +171,7 @@ exports.handler = async (event) => {
         }
 
         const body = parseBody(event.body);
-        const title = typeof body.title === "string" ? body.title.trim() : "";
+        const title = sanitizeString(body.title, MAX_TITLE_LENGTH);
 
         if (!title) {
           response.statusCode = 400;
