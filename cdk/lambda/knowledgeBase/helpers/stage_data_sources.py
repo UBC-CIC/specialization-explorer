@@ -116,8 +116,23 @@ def _assert_s3_object_exists(bucket: str, key: str) -> int:
     return s3_client.head_object(Bucket=bucket, Key=key)["ContentLength"]
 
 
-def _approved_key_for(bucket: str, key: str) -> str:
-    """The corpus key an uploaded object is promoted to; only presigned-upload keys qualify"""
+_UPLOAD_PREFIX_BY_KIND = {
+    "csv": QUARANTINE_PREFIX + "csv/",
+    "markdown": QUARANTINE_PREFIX + "markdown/",
+    "metadata": QUARANTINE_PREFIX + "json/",
+}
+_TIMESTAMP_PREFIX = re.compile(r"^\d+_")
+
+
+def _approved_key_for(bucket: str, key: str, file_name: str, kind: str) -> str:
+    """
+    The corpus key an uploaded object is promoted to; only presigned-upload keys qualify.
+
+    The object actually being promoted must be the one the request describes: it has to sit
+    under the quarantine folder minted for its kind ("csv", "markdown" or "metadata") and its
+    name, less the upload timestamp, has to be the declared file name, so the checks made on
+    the declared name apply to the stored object.
+    """
     if bucket != KB_BUCKET:
         raise InvalidUploadError("Files must be in the knowledge base bucket")
     if (
@@ -127,6 +142,11 @@ def _approved_key_for(bucket: str, key: str) -> str:
         or ".." in key.split("/")
     ):
         raise InvalidUploadError(f"Files must be uploaded with a presigned URL (key under {QUARANTINE_PREFIX})")
+
+    upload_prefix = _UPLOAD_PREFIX_BY_KIND[kind]
+    stored_name = key[len(upload_prefix):] if key.startswith(upload_prefix) else ""
+    if "/" in stored_name or _TIMESTAMP_PREFIX.sub("", stored_name, count=1) != os.path.basename(file_name).strip():
+        raise InvalidUploadError(f"The uploaded {kind} file does not match {file_name}")
     return APPROVED_PREFIX + key[len(QUARANTINE_PREFIX):]
 
 
@@ -487,8 +507,12 @@ def stage_data_sources(event, body, connection, acting_user):
             return _response(event, 400, {"error": pair_error})
 
         try:
-            primary_approved_key = _approved_key_for(primary_s3_bucket, primary_s3_key)
-            metadata_approved_key = _approved_key_for(metadata_s3_bucket, metadata_s3_key)
+            primary_approved_key = _approved_key_for(
+                primary_s3_bucket, primary_s3_key, primary_file_name, source_type
+            )
+            metadata_approved_key = _approved_key_for(
+                metadata_s3_bucket, metadata_s3_key, metadata_file_name, "metadata"
+            )
         except InvalidUploadError as e:
             return _response(event, 400, {"error": str(e)})
 
