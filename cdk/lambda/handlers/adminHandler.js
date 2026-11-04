@@ -252,7 +252,7 @@ exports.handler = async (event) => {
         const adminRows = await sqlConnection`
           SELECT id, email, role
           FROM users
-          WHERE email = ${adminEmail}
+          WHERE lower(email) = lower(${adminEmail})
           LIMIT 1
         `;
 
@@ -440,7 +440,7 @@ exports.handler = async (event) => {
         const adminRows = await sqlConnection`
           SELECT id, email, role
           FROM users
-          WHERE email = ${adminEmail}
+          WHERE lower(email) = lower(${adminEmail})
           LIMIT 1
         `;
 
@@ -585,7 +585,7 @@ exports.handler = async (event) => {
         const adminRows = await sqlConnection`
           SELECT id, email, role
           FROM users
-          WHERE email = ${adminEmail}
+          WHERE lower(email) = lower(${adminEmail})
           LIMIT 1
         `;
 
@@ -1237,7 +1237,7 @@ exports.handler = async (event) => {
         const adminRows = await sqlConnection`
           SELECT id, role
           FROM users
-          WHERE email = ${adminEmail}
+          WHERE lower(email) = lower(${adminEmail})
           LIMIT 1
         `;
 
