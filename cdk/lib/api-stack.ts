@@ -1771,6 +1771,10 @@ export class ApiGatewayStack extends cdk.Stack {
     });
     wsRateLimitTable.grant(defaultFunction, "dynamodb:UpdateItem");
     defaultFunction.addEnvironment("RATE_LIMIT_TABLE_NAME", wsRateLimitTable.tableName);
+    // Text generation counts requests that reach it over REST against the same per-user budget
+    wsRateLimitTable.grant(lambdaTextGen, "dynamodb:UpdateItem");
+    lambdaTextGen.addEnvironment("RATE_LIMIT_TABLE_NAME", wsRateLimitTable.tableName);
+    lambdaTextGen.addEnvironment("MESSAGE_RATE_LIMIT_PER_MINUTE", "10");
     // A reply streams for 10 to 60 seconds, so 10 messages a minute is well above normal use.
     // The chat page sends a warm-up every 5 minutes.
     defaultFunction.addEnvironment("MESSAGE_RATE_LIMIT_PER_MINUTE", "10");

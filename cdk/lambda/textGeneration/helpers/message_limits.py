@@ -59,13 +59,15 @@ def check_limit(user_id: str, db_connection) -> tuple[bool, dict]:
         logger.error(f"Error checking message limit DB: {e}")
         return False, {"error": "Unable to verify message limits from DB."}
 
-def record_message_sent(user_id: str, db_connection) -> dict:
+def reserve_message(user_id: str, db_connection) -> tuple[bool, dict]:
     """
-    Atomically increments the user's message counter by 1,
-    resetting the 24-hour window if it has expired.
+    Atomically charges one message to the user's daily allowance, resetting the 24-hour window
+    if it has expired. The limit test and the increment happen in a single statement, so
+    concurrent requests cannot all pass a check made before any of them is counted.
 
     Returns:
-        usage_info: dict with message stats
+        (reserved: bool, usage_info: dict). When not reserved, usage_info describes the
+        current usage (or carries an error).
     """
     now_utc = datetime.now(timezone.utc)
 
@@ -77,53 +79,40 @@ def record_message_sent(user_id: str, db_connection) -> dict:
                 SET
                     messages_sent = CASE
                         WHEN messages_window_started_at < NOW() - INTERVAL '24 hours' THEN 1
-                        ELSE messages_sent + 1
+                        ELSE COALESCE(messages_sent, 0) + 1
                     END,
                     messages_window_started_at = CASE
                         WHEN messages_window_started_at < NOW() - INTERVAL '24 hours' THEN NOW()
                         ELSE messages_window_started_at
                     END
                 WHERE id = %s
+                  AND (
+                      messages_window_started_at < NOW() - INTERVAL '24 hours'
+                      OR COALESCE(messages_sent, 0) < %s
+                  )
                 RETURNING messages_sent, messages_window_started_at
                 """,
-                (user_id,)
+                (user_id, config.MAX_MESSAGES_PER_DAY)
             )
             row = cur.fetchone()
-
-            if not row:
-                return {
-                    "messages_sent": 0,
-                    "limit": config.MAX_MESSAGES_PER_DAY,
-                    "remaining": config.MAX_MESSAGES_PER_DAY,
-                    "reset_at": (now_utc + timedelta(hours=24)).isoformat()
-                }
-
-            messages_sent = row[0] or 0
-            window_start = row[1]
-
-            db_connection.commit()
-
-            if window_start is None:
-                window_start = now_utc
-
-            if window_start.tzinfo is None:
-                window_start = window_start.replace(tzinfo=timezone.utc)
-
-            reset_at = (window_start + timedelta(hours=24)).isoformat()
-
-            return {
-                "messages_sent": messages_sent,
-                "limit": config.MAX_MESSAGES_PER_DAY,
-                "remaining": max(0, config.MAX_MESSAGES_PER_DAY - messages_sent),
-                "reset_at": reset_at
-            }
-
+        db_connection.commit()
     except Exception as e:
-        logger.error(f"Error recording message usage: {e}")
+        logger.error(f"Error reserving a message: {e}")
         db_connection.rollback()
-        return {
-            "messages_sent": 0,
-            "limit": config.MAX_MESSAGES_PER_DAY,
-            "remaining": 0,
-            "reset_at": (now_utc + timedelta(hours=24)).isoformat()
-        }
+        return False, {"error": "Unable to verify message limits from DB."}
+
+    if not row:
+        # Either the user is at the limit or has no row; check_limit tells them apart
+        return check_limit(user_id, db_connection)
+
+    messages_sent = row[0] or 0
+    window_start = row[1] or now_utc
+    if window_start.tzinfo is None:
+        window_start = window_start.replace(tzinfo=timezone.utc)
+
+    return True, {
+        "messages_sent": messages_sent,
+        "limit": config.MAX_MESSAGES_PER_DAY,
+        "remaining": max(0, config.MAX_MESSAGES_PER_DAY - messages_sent),
+        "reset_at": (window_start + timedelta(hours=24)).isoformat()
+    }
