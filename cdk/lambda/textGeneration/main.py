@@ -11,6 +11,7 @@ from helpers.db_connection import get_db_connection
 import helpers.config as config
 from helpers.session_security import validate_session_ownership, sanitize_session_id, session_exists
 from helpers.tracing import tracer
+from helpers.audit import audit_log
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -74,6 +75,7 @@ def handler(event, context=None):
     try:
         user_id = str(uuid.UUID(str(user_id)))
     except ValueError:
+        audit_log(event, 401)
         return {
             'statusCode': 401,
             'body': json.dumps({'error': 'Unauthorized'})
@@ -103,10 +105,12 @@ def handler(event, context=None):
         # and nothing is written before ownership and the message quota are checked
         if not validate_session_ownership(conn, chat_session_id, user_id):
             if not session_exists(conn, chat_session_id):
+                audit_log(event, 404, details={'chat_session_id': chat_session_id})
                 return {
                     'statusCode': 404,
                     'body': json.dumps({'error': 'Chat session not found'})
                 }
+            audit_log(event, 403, details={'chat_session_id': chat_session_id, 'user_id': user_id})
             return {
                 'statusCode': 403,
                 'body': json.dumps({'error': 'Unauthorized access to chat session'})

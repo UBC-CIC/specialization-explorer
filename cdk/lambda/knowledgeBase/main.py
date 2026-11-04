@@ -11,6 +11,7 @@ from helpers.start_ingestion_job import start_ingestion_job
 from helpers.generate_presigned_url import generate_presigned_url
 from helpers.generate_presigned_urls_batch import generate_presigned_urls_batch
 from helpers.update_status import update_status
+from helpers.audit import audit_log, pick
 
 # Set up logging
 logger = logging.getLogger()
@@ -125,7 +126,44 @@ def _parse_body(event):
 
     return body
 
+def _is_scheduler_invocation(event):
+    # API Gateway events carry a requestContext; only a direct scheduler invocation does not
+    return event.get("task") == "poll_ingestion_run" and "requestContext" not in event
+
+
+# Request fields recorded with the audit entry; bodies are otherwise left out of the logs
+_AUDIT_BODY_FIELDS = [
+    "type", "name", "include_patterns", "exclude_patterns",
+    "csv_s3_key", "markdown_s3_key", "metadata_s3_key",
+]
+
+
+def _audit_details_from_body(body):
+    if not isinstance(body, dict):
+        return {}
+    details = pick(body, _AUDIT_BODY_FIELDS)
+    files = body.get("files")
+    if isinstance(files, list):
+        details["file_count"] = len(files)
+    items = body.get("items")
+    if isinstance(items, list):
+        details["item_count"] = len(items)
+        details["s3_keys"] = [
+            k for item in items[:100] if isinstance(item, dict)
+            for k in pick(item, ["primary_s3_key", "metadata_s3_key"]).values()
+        ]
+    return details
+
+
 def handler(event, context=None):
+    details = {}
+    response = _handle(event, details)
+    if not _is_scheduler_invocation(event):
+        audit_log(event, response["statusCode"], privileged=True, details=details or None)
+    return response
+
+
+def _handle(event, audit_details):
     # Body and headers are omitted: the headers carry the caller's bearer token
     safe_event = {k: v for k, v in event.items() if k not in ('body', 'headers', 'multiValueHeaders')}
     logger.info("Event: %s (body and headers omitted)", json.dumps(safe_event))
@@ -133,7 +171,7 @@ def handler(event, context=None):
     try:
         # Scheduler polling path
         # API Gateway events carry a requestContext; only a direct scheduler invocation does not
-        if event.get("task") == "poll_ingestion_run" and "requestContext" not in event:
+        if _is_scheduler_invocation(event):
             try:
                 connection = _connect_to_db()
             except Exception as e:
@@ -163,12 +201,15 @@ def handler(event, context=None):
 
         # Route: GET /admin/generate-presigned-url
         if method == "GET" and resource == "/admin/generate-presigned-url":
+            audit_details.update(pick(event.get("queryStringParameters"), ["file_name", "content_type"]))
             return generate_presigned_url(event=event)
 
         try:
             body = _parse_body(event)
         except ValueError as e:
             return _response(event, 400, {"error": str(e)})
+
+        audit_details.update(_audit_details_from_body(body))
 
         # Route: POST /admin/generate-presigned-urls/batch
         if method == "POST" and resource == "/admin/generate-presigned-urls/batch":
