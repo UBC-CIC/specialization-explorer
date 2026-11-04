@@ -347,8 +347,9 @@ def get_response(
             "intervention": None,
         }
     except ValueError as e:
+        logger.error(f"Invalid request: {e}")
         return {
-            "response": str(e),
+            "response": "Your message could not be processed.",
             "sources_used": [],
             "warning": None,
             "intervention": None

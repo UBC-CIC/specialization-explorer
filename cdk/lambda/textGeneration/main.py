@@ -88,6 +88,13 @@ def handler(event, context=None):
             'body': json.dumps({'error': 'Missing query or chat_session_id'})
         }
 
+    # The database driver rejects NUL characters, which would fail the request after it is charged
+    if '\x00' in query:
+        return {
+            'statusCode': 400,
+            'body': json.dumps({'error': 'Query contains invalid characters'})
+        }
+
     # Sanitize session ID before querying DB
     try: 
         chat_session_id = sanitize_session_id(chat_session_id)
