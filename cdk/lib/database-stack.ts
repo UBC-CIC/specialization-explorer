@@ -1,4 +1,4 @@
-import { Stack, StackProps, RemovalPolicy, SecretValue, Token } from "aws-cdk-lib";
+import { Stack, StackProps, RemovalPolicy, Token } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { Duration } from "aws-cdk-lib";
 
@@ -63,9 +63,11 @@ export class DatabaseStack extends Stack {
       secretName: secretPathUserName,
       description: "Secrets for clients to connect to RDS",
       removalPolicy: RemovalPolicy.DESTROY,
-      secretObjectValue: {
-        username: SecretValue.unsafePlainText("applicationUsername"), // will be changed at runtime
-        password: SecretValue.unsafePlainText("applicationPassword"), // will be changed at runtime
+      // The username and a random password are replaced with the real credentials at deploy time
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ username: "applicationUsername" }),
+        generateStringKey: "password",
+        excludePunctuation: true,
       },
     });
 
@@ -77,9 +79,11 @@ export class DatabaseStack extends Stack {
         secretName: secretPathTableCreator,
         description: "Secrets for TableCreator to connect to RDS",
         removalPolicy: RemovalPolicy.DESTROY,
-        secretObjectValue: {
-          username: SecretValue.unsafePlainText("applicationUsername"), // will be changed at runtime
-          password: SecretValue.unsafePlainText("applicationPassword"), // will be changed at runtime
+        // The username and a random password are replaced with the real credentials at deploy time
+        generateSecretString: {
+          secretStringTemplate: JSON.stringify({ username: "applicationUsername" }),
+          generateStringKey: "password",
+          excludePunctuation: true,
         },
       }
     );
