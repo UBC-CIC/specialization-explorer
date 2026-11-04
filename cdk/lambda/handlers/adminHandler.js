@@ -726,43 +726,6 @@ exports.handler = async (event) => {
         }
       }
 
-      // POST /admin/users - Create new admin user in the system
-      case "POST /admin/users":
-        // Parse JSON request body containing new user data
-        let userData;
-        try {
-          userData = parseBody(event.body);
-        } catch (error) {
-          response.statusCode = 400;
-          response.body = JSON.stringify({ error: error.message });
-          break;
-        }
-
-        // Extract user fields from request body
-        const { display_name, email, institution_id } = userData;
-
-        // Validate required fields
-        if (!display_name || !email) {
-          response.statusCode = 400;
-          response.body = JSON.stringify({
-            error: "display_name and email are required",
-          });
-          break;
-        }
-
-        // Insert new admin user into database
-        // Using postgres library template literal syntax for better performance
-        const result = await sqlConnection`
-          INSERT INTO users (display_name, email, institution_id, role)
-          VALUES (${display_name}, ${email}, ${institution_id || null}, 'admin')
-          RETURNING id, display_name, email, role, institution_id, created_at
-        `;
-
-        response.statusCode = 201; // Created
-        data = result[0];
-        response.body = JSON.stringify(data);
-        break;
-
       // Get analytics data
       case "GET /admin/analytics": {
         const qs = event.queryStringParameters ?? {};

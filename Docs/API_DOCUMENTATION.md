@@ -495,50 +495,6 @@ curl -X GET "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/user
 
 ---
 
-### Create Admin User
-
-Create a new admin user.
-
-**Endpoint:** `POST /admin/users`
-
-**Request Body:**
-
-```json
-{
-  "display_name": "Jane Smith",
-  "email": "jane.smith@example.com",
-  "institution_id": "ubc"
-}
-```
-
-**Parameters:**
-
-- `display_name` (string, required): Display name (max 255 chars)
-- `email` (string, required): Email address (max 255 chars)
-- `institution_id` (string, optional): Institution identifier
-
-**Response:**
-
-```json
-{
-  "id": "uuid",
-  "display_name": "Jane Smith",
-  "email": "jane.smith@example.com",
-  "role": "admin"
-}
-```
-
-**Example (cURL):**
-
-```bash
-curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/users" \
-  -H "Authorization: eyJraWQiOiJ..." \
-  -H "Content-Type: application/json" \
-  -d '{"display_name": "Jane Smith", "email": "jane.smith@example.com"}'
-```
-
----
-
 ### Register Calling Administrator
 
 Records the calling administrator in the users table with the `admin` role. The user is identified by the verified e-mail in the caller's Cognito ID token; the request takes no body, and no other user can be targeted. Each call is written to the audit log with the previous and new role.

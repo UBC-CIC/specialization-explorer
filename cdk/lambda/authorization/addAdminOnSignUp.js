@@ -28,12 +28,14 @@ exports.handler = async (event) => {
 
     console.log("Creating user");
 
-    // New accounts start without privileges; admins are granted via /admin/promote_user
+    // New accounts start without privileges; admins are granted via /admin/promote_user.
+    // An existing row for the address is reset to student too, so a new account never inherits
+    // a role left on the row; an administrator is re-recorded when they next sign in.
     const result = await sqlConnection`
       INSERT INTO users (id, display_name, email, role, created_at, last_seen_at)
       VALUES (${crypto.randomUUID()}, ${displayName}, ${email}, 'student', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT (email) DO UPDATE
-      SET last_seen_at = CURRENT_TIMESTAMP
+      SET last_seen_at = CURRENT_TIMESTAMP, role = 'student'
       RETURNING id, email, role
     `;
 
