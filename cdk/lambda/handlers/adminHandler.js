@@ -1000,8 +1000,11 @@ exports.handler = async (event) => {
           const limit = Math.min(parseInt(qs.limit ?? "50", 10), 100); // cap limit to 100
           const offset = parseInt(qs.offset ?? "0", 10);
 
+          // user_number counts all users by creation (oldest = 1), like chat_number. The window
+          // runs before LIMIT/OFFSET, so numbers stay stable across pages and activity re-sorting.
           const rows = await sqlConnection`
-            SELECT id, email, display_name, role, created_at, last_seen_at
+            SELECT id, email, display_name, role, created_at, last_seen_at,
+                   ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC)::int AS user_number
             FROM users
             ORDER BY COALESCE(last_seen_at, created_at) DESC
             LIMIT ${limit} OFFSET ${offset}
