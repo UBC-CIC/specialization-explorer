@@ -5,31 +5,13 @@ const {
 } = require("@aws-sdk/client-secrets-manager");
 const { Client } = require("pg");
 const crypto = require("crypto");
-const https = require("https");
+const fs = require("fs");
 const path = require("path");
 const migrate = require("node-pg-migrate").default;
 
-const RDS_CA_URL = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem";
-
-function fetchCert(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => resolve(Buffer.concat(chunks)));
-      res.on("error", reject);
-    }).on("error", reject);
-  });
-}
-
-let cachedCert = null;
-
-async function getRdsCa() {
-  if (!cachedCert) {
-    cachedCert = await fetchCert(RDS_CA_URL);
-  }
-  return cachedCert;
-}
+// The instance certificate is verified against the RDS CA bundle shipped with the function
+// https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+const RDS_CA = fs.readFileSync(path.join(__dirname, "certs", "global-bundle.pem"));
 
 const sm = new SecretsManagerClient();
 
@@ -48,7 +30,6 @@ async function putSecret(name, secret) {
 }
 
 async function runMigrations(db) {
-  const RDS_CA = await getRdsCa();
   const dbUrl = `postgresql://${encodeURIComponent(
     db.username
   )}:${encodeURIComponent(db.password)}@${db.host}:${db.port || 5432}/${
@@ -78,7 +59,6 @@ async function createAppUsers(
   userSecretName,
   tableCreatorSecretName
 ) {
-  const RDS_CA = await getRdsCa();
   const adminClient = new Client({
     user: adminDb.username,
     password: adminDb.password,
@@ -134,15 +114,15 @@ async function createAppUsers(
     DO $$
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${RW_NAME}') THEN
-        EXECUTE format('CREATE USER ${RW_NAME} WITH PASSWORD %L', '${rwPass}');
+        EXECUTE format('CREATE USER ${RW_NAME} WITH PASSWORD %L', current_setting('app.rw_pass'));
       ELSE
-        EXECUTE format('ALTER USER ${RW_NAME} WITH PASSWORD %L', '${rwPass}');
+        EXECUTE format('ALTER USER ${RW_NAME} WITH PASSWORD %L', current_setting('app.rw_pass'));
       END IF;
 
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${TC_NAME}') THEN
-        EXECUTE format('CREATE USER ${TC_NAME} WITH PASSWORD %L', '${tcPass}');
+        EXECUTE format('CREATE USER ${TC_NAME} WITH PASSWORD %L', current_setting('app.tc_pass'));
       ELSE
-        EXECUTE format('ALTER USER ${TC_NAME} WITH PASSWORD %L', '${tcPass}');
+        EXECUTE format('ALTER USER ${TC_NAME} WITH PASSWORD %L', current_setting('app.tc_pass'));
       END IF;
     END$$;
 
@@ -152,6 +132,12 @@ async function createAppUsers(
 
   await adminClient.query("BEGIN");
   try {
+    // Passwords are bound as parameters and read back via transaction-local
+    // settings, so they never appear in statement text or error output.
+    await adminClient.query(
+      "SELECT set_config('app.rw_pass', $1, true), set_config('app.tc_pass', $2, true)",
+      [rwPass, tcPass]
+    );
     await adminClient.query(sql);
     await adminClient.query("COMMIT");
   } catch (e) {

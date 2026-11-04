@@ -83,6 +83,12 @@ exports.handler = async (event) => {
       : ANONYMOUS_RESOURCES.map((r) => `${apiGatewayArnPrefix}/${r}`);
 
     const policy = generatePolicy(decoded.sub || "anonymous", "Allow", resources);
+    // The admin plane has its own authorizer; never let a user token reach it
+    policy.policyDocument.Statement.push({
+      Action: "execute-api:Invoke",
+      Effect: "Deny",
+      Resource: [`${apiGatewayArnPrefix}/*/admin/*`],
+    });
     // Only the verified identity is passed on; other token claims are not trusted downstream
     policy.context = decoded.sub ? { userId: decoded.sub } : {};
     return policy;

@@ -179,18 +179,18 @@ export class KnowledgeBaseStack extends Stack {
       description: "Execution role for custom resource that creates AOSS vector index",
       managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole")],
     });
-    vectorIndexManagerRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ["aoss:APIAccessAll", "aoss:DashboardsAccessAll"],
-      resources: ["*"],
-    }));
-
     // Vector collection
     this.vectorCollection = new opensearchserverless.CfnCollection(this, "VectorCollection", {
       name: collectionName,
       type: "VECTORSEARCH",
       description: "Vector collection for Bedrock Knowledge Base",
     });
+
+    vectorIndexManagerRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ["aoss:APIAccessAll"],
+      resources: [this.vectorCollection.attrArn],
+    }));
 
     // Bedrock role IAM permissions
     knowledgeBaseRole.addToPolicy(new iam.PolicyStatement({

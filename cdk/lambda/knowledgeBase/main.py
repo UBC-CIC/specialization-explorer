@@ -126,12 +126,14 @@ def _parse_body(event):
     return body
 
 def handler(event, context=None):
-    safe_event = {k: v for k, v in event.items() if k != 'body'}
-    logger.info("Event: %s (body omitted)", json.dumps(safe_event))
+    # Body and headers are omitted: the headers carry the caller's bearer token
+    safe_event = {k: v for k, v in event.items() if k not in ('body', 'headers', 'multiValueHeaders')}
+    logger.info("Event: %s (body and headers omitted)", json.dumps(safe_event))
     
     try:
         # Scheduler polling path
-        if event.get("task") == "poll_ingestion_run":
+        # API Gateway events carry a requestContext; only a direct scheduler invocation does not
+        if event.get("task") == "poll_ingestion_run" and "requestContext" not in event:
             try:
                 connection = _connect_to_db()
             except Exception as e:

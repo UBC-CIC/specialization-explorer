@@ -5,7 +5,7 @@ const {
   GetSecretValueCommand,
 } = require("@aws-sdk/client-secrets-manager");
 const crypto = require("crypto");
-const { validateUUID } = require("./utils/validation.js");
+const { validateUUID, parsePositiveInt } = require("./utils/validation.js");
 const { auditLog } = require("./utils/audit.js");
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -425,8 +425,8 @@ exports.handler = async (event) => {
           break;
         }
 
-        const limit = Math.min(parseInt(event.queryStringParameters?.limit) || 200, 1000);
-        const offset = parseInt(event.queryStringParameters?.offset) || 0;
+        const limit = parsePositiveInt(event.queryStringParameters?.limit, 200, 1000) || 200;
+        const offset = parsePositiveInt(event.queryStringParameters?.offset, 0);
 
         const rows = await sqlConnection`
           SELECT

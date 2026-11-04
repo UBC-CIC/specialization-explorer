@@ -346,7 +346,7 @@ export class ApiGatewayStack extends cdk.Stack {
     const data = Fn.transform("AWS::Include", { Location: asset.s3ObjectUrl });
 
     const accessLogGroup = new logs.LogGroup(this, `${id}-ApiAccessLogs`, {
-      retention: logs.RetentionDays.ONE_WEEK,
+      retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
@@ -550,7 +550,8 @@ export class ApiGatewayStack extends cdk.Stack {
                         searchString: "/user",
                         fieldToMatch: { uriPath: {} },
                         textTransformations: [{ priority: 0, type: "NONE" }],
-                        positionalConstraint: "EXACTLY",
+                        // The inspected path starts with the stage name (/prod/user)
+                        positionalConstraint: "ENDS_WITH",
                       },
                     },
                   ],
@@ -582,7 +583,8 @@ export class ApiGatewayStack extends cdk.Stack {
                   searchString: "/user/publicToken",
                   fieldToMatch: { uriPath: {} },
                   textTransformations: [{ priority: 0, type: "NONE" }],
-                  positionalConstraint: "EXACTLY",
+                  // The inspected path starts with the stage name (/prod/user/publicToken)
+                  positionalConstraint: "ENDS_WITH",
                 },
               },
             },
@@ -853,7 +855,7 @@ export class ApiGatewayStack extends cdk.Stack {
     );
 
     // Grant access to specific secret instead of '*'
-    db.secretPathTableCreator.grantRead(coglambdaRole);
+    db.secretPathUser.grantRead(coglambdaRole);
 
     // Grant access to EC2
     coglambdaRole.addToPolicy(
@@ -1140,7 +1142,7 @@ export class ApiGatewayStack extends cdk.Stack {
         handler: "addAdminOnSignUp.handler",
         timeout: Duration.seconds(30),
         environment: {
-          SM_DB_CREDENTIALS: db.secretPathTableCreator.secretName,
+          SM_DB_CREDENTIALS: db.secretPathUser.secretName,
           RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
         },
         vpc: vpcStack.vpc,
@@ -1456,7 +1458,7 @@ export class ApiGatewayStack extends cdk.Stack {
           "scheduler:GetSchedule",
         ],
         resources: [
-          `arn:aws:scheduler:${this.region}:${this.account}:schedule/default/*`,
+          `arn:aws:scheduler:${this.region}:${this.account}:schedule/default/kb-*`,
         ],
       })
     );
@@ -1464,7 +1466,12 @@ export class ApiGatewayStack extends cdk.Stack {
     // EventBridge Scheduler role to invoke this Lambda function
     const schedulerInvokeRole = new iam.Role(this, `${id}-schedulerInvokeRole`, {
       roleName: `${id}-schedulerInvokeRole`,
-      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
+      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com").withConditions({
+        StringEquals: { "aws:SourceAccount": this.account },
+        ArnLike: {
+          "aws:SourceArn": `arn:aws:scheduler:${this.region}:${this.account}:schedule/default/kb-*`,
+        },
+      }),
     });
 
     schedulerInvokeRole.addToPolicy(
@@ -1947,6 +1954,7 @@ export class ApiGatewayStack extends cdk.Stack {
           requestTime: "$context.requestTime",
           routeKey: "$context.routeKey",
           connectionId: "$context.connectionId",
+          userId: "$context.authorizer.userId",
           status: "$context.status",
         }),
       },

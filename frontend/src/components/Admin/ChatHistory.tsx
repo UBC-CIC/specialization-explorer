@@ -44,6 +44,8 @@ type UserData = {
     email: string;
     role: string;
     last_seen_at?: string;
+    // Position among all users by creation, oldest = 1
+    user_number?: number;
 };
 
 type ChatSession = {
@@ -286,7 +288,7 @@ export default function ChatHistory() {
                                         >
                                             <div>
                                                 <div className="font-semibold text-base text-gray-900">
-                                                    {user.email || `User ${index + 1}`}
+                                                    {user.email || `User ${user.user_number ?? index + 1}`}
                                                 </div>
                                             </div>
                                             <div className="text-gray-400">

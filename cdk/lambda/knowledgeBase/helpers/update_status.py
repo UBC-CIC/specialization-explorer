@@ -476,18 +476,7 @@ def update_status(event, connection):
         return _response(
             event,
             400,
-            {
-                "error": "Missing required scheduler payload fields",
-                "received": {
-                    "knowledge_base_id": kb_id,
-                    "phase": phase,
-                    "sync_session_id": sync_session_id,
-                    "bedrock_data_source_id": bedrock_data_source_id,
-                    "bedrock_ingestion_job_id": bedrock_ingestion_job_id,
-                    "db_ingestion_run_ids": db_ingestion_run_ids,
-                    "schedule_name": schedule_name,
-                },
-            },
+            {"error": "Missing required scheduler payload fields"},
         )
 
     resp = bedrock_agent.get_ingestion_job(
@@ -559,9 +548,12 @@ def update_status(event, connection):
     try:
         # A COMPLETE job can still have failed documents. Each reason is attached only to the
         # run whose file or website it names, so one bad page does not mark the whole batch with
-        # errors. Reasons that name another seed's page, and reasons Bedrock did not itemize
-        # (it truncates the failure list when there are many), are logged only -- never smeared
-        # onto unrelated runs in this batch. A run with no failures of its own stays clean.
+        # errors. When every failed document is itemized, leftover reasons (another seed's page,
+        # or Bedrock's generic job-level notice) are logged only and the other runs stay clean.
+        # When Bedrock reports more failures than it itemizes (it truncates long failure lists),
+        # the other runs get a count-only summary so the un-itemized failures stay visible in
+        # ingestion_runs. The unmatched reasons themselves are never persisted on these runs:
+        # they name other seeds' pages and other sources' S3 URIs, so they go to CloudWatch only.
         attributed_runs = {}
         if normalized_status == "completed" and (failed_document_count or failure_reasons):
             attributed_runs, unmatched_reasons, named_document_count = _attribute_document_failures(
@@ -578,7 +570,14 @@ def update_status(event, connection):
                     failed_document_count,
                     "; ".join(unmatched_reasons),
                 )
-            error_message = None
+            if named_document_count < failed_document_count:
+                unitemized_count = failed_document_count - named_document_count
+                error_message = (
+                    f"{unitemized_count} of {failed_document_count} failed documents "
+                    "were not itemized by Bedrock"
+                )
+            else:
+                error_message = None
 
         rows_updated = 0
         for run_id, entry in attributed_runs.items():

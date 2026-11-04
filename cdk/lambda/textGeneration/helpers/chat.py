@@ -279,6 +279,9 @@ def get_response(
                     guardrail_result = invoke_guardrail(query, config.REGION)
             except Exception as e:
                 logger.error(f"Guardrail invocation failed: {e}")
+                # The guardrail call is billable whether or not it succeeded
+                if save_user_message:
+                    record_message_sent(user_id, db_connection)
                 return {
                     "response": "An error occurred processing your request.",
                     "sources_used": [],
@@ -305,12 +308,14 @@ def get_response(
                 _save_ai_response(db_connection, chat_session_id, denial_text, sources=[], warning_text=None)
                 if stream_callback:
                     stream_callback(denial_text)
+                if save_user_message:
+                    usage_info = record_message_sent(user_id, db_connection)
                 return {
                     "response": denial_text,
                     "sources_used": [],
                     "sessionId": chat_session_id,
                     "is_first_message": False,
-                    "message_usage": {},
+                    "message_usage": usage_info,
                     "warning": None,
                     "intervention": None,
                 }

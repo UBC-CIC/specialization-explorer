@@ -252,7 +252,7 @@ exports.handler = async (event) => {
         const adminRows = await sqlConnection`
           SELECT id, email, role
           FROM users
-          WHERE email = ${adminEmail}
+          WHERE lower(email) = lower(${adminEmail})
           LIMIT 1
         `;
 
@@ -368,6 +368,12 @@ exports.handler = async (event) => {
             break;
           }
 
+          auditDetails = {
+            type: messageType,
+            versionId: created.row.id,
+            version: created.row.version,
+          };
+
           response.statusCode = 200;
           response.body = JSON.stringify(created.row);
           break;
@@ -434,7 +440,7 @@ exports.handler = async (event) => {
         const adminRows = await sqlConnection`
           SELECT id, email, role
           FROM users
-          WHERE email = ${adminEmail}
+          WHERE lower(email) = lower(${adminEmail})
           LIMIT 1
         `;
 
@@ -579,7 +585,7 @@ exports.handler = async (event) => {
         const adminRows = await sqlConnection`
           SELECT id, email, role
           FROM users
-          WHERE email = ${adminEmail}
+          WHERE lower(email) = lower(${adminEmail})
           LIMIT 1
         `;
 
@@ -994,8 +1000,11 @@ exports.handler = async (event) => {
           const limit = Math.min(parseInt(qs.limit ?? "50", 10), 100); // cap limit to 100
           const offset = parseInt(qs.offset ?? "0", 10);
 
+          // user_number counts all users by creation (oldest = 1), like chat_number. The window
+          // runs before LIMIT/OFFSET, so numbers stay stable across pages and activity re-sorting.
           const rows = await sqlConnection`
-            SELECT id, email, display_name, role, created_at, last_seen_at
+            SELECT id, email, display_name, role, created_at, last_seen_at,
+                   ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC)::int AS user_number
             FROM users
             ORDER BY COALESCE(last_seen_at, created_at) DESC
             LIMIT ${limit} OFFSET ${offset}
@@ -1231,7 +1240,7 @@ exports.handler = async (event) => {
         const adminRows = await sqlConnection`
           SELECT id, role
           FROM users
-          WHERE email = ${adminEmail}
+          WHERE lower(email) = lower(${adminEmail})
           LIMIT 1
         `;
 
@@ -1298,6 +1307,9 @@ exports.handler = async (event) => {
           });
           break;
         }
+
+        // Only the settings that were changed and their new values are recorded
+        auditDetails = { changes: patch };
 
         response.statusCode = 200;
         response.body = JSON.stringify(updated[0]);

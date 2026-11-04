@@ -23,20 +23,24 @@ export class DBFlowStack extends Stack {
       description: "Role for all Lambda functions inside VPC",
     });
 
-    // Add necessary policies to the Lambda role
+    // The initializer only reads the admin credential and writes the application credentials
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: [
-          // Secrets Manager
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:PutSecretValue",
-        ],
+        actions: ["secretsmanager:GetSecretValue"],
         resources: [
-        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${db.secretPathAdminName}-*`,
-        db.secretPathUser.secretArn,
-        db.secretPathTableCreator.secretArn,
-        ]
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${db.secretPathAdminName}-*`,
+        ],
+      })
+    );
+    lambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["secretsmanager:PutSecretValue"],
+        resources: [
+          db.secretPathUser.secretArn,
+          db.secretPathTableCreator.secretArn,
+        ],
       })
     );
 
@@ -63,11 +67,6 @@ export class DBFlowStack extends Stack {
         ],
         resources: ["*"],
       })
-    );
-
-    // Add additional managed policies
-    lambdaRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMReadOnlyAccess")
     );
 
     // Create a Lambda layer for node-pg-migrate

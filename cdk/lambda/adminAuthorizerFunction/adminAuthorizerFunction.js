@@ -49,7 +49,7 @@ exports.handler = async (event) => {
 
     // Modify the response output
     const parts = event.methodArn.split("/");
-    const resource = parts.slice(0, 2).join("/") + "*";
+    const resource = parts.slice(0, 2).join("/") + "/*/admin/*";
 
     return {
       principalId: payload.sub, // The principal user identification associated with the token sent by the client.
