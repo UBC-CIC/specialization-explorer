@@ -1113,6 +1113,30 @@ exports.handler = async (event) => {
           break;
         }
 
+        // The list is written into the model's system prompt, so it is bounded and kept free of
+        // angle brackets that could close the <allowed_specializations> block
+        if (patch.specialization_list !== undefined) {
+          const list = patch.specialization_list;
+          const valid =
+            Array.isArray(list) &&
+            list.length <= 200 &&
+            list.every(
+              (item) =>
+                typeof item === "string" &&
+                item.trim().length > 0 &&
+                item.length <= 200 &&
+                !/[<>]/.test(item)
+            );
+          if (!valid) {
+            response.statusCode = 400;
+            response.body = JSON.stringify({
+              error:
+                "specialization_list must be an array of at most 200 non-empty strings of at most 200 characters, without < or >",
+            });
+            break;
+          }
+        }
+
         if (
           patch.max_messages_per_day !== undefined &&
           (!isFiniteInt(patch.max_messages_per_day) ||
