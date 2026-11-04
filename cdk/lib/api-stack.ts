@@ -346,7 +346,7 @@ export class ApiGatewayStack extends cdk.Stack {
     const data = Fn.transform("AWS::Include", { Location: asset.s3ObjectUrl });
 
     const accessLogGroup = new logs.LogGroup(this, `${id}-ApiAccessLogs`, {
-      retention: logs.RetentionDays.ONE_WEEK,
+      retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
@@ -1947,6 +1947,7 @@ export class ApiGatewayStack extends cdk.Stack {
           requestTime: "$context.requestTime",
           routeKey: "$context.routeKey",
           connectionId: "$context.connectionId",
+          userId: "$context.authorizer.userId",
           status: "$context.status",
         }),
       },

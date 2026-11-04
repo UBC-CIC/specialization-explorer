@@ -3,6 +3,7 @@
 exports.handler = async (event) => {
   console.log("WebSocket connection authorized", {
     connectionId: event.requestContext?.connectionId,
+    userId: event.requestContext?.authorizer?.userId,
     domainName: event.requestContext?.domainName,
     stage: event.requestContext?.stage,
     timestamp: new Date().toISOString(),

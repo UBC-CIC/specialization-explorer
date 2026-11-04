@@ -368,6 +368,12 @@ exports.handler = async (event) => {
             break;
           }
 
+          auditDetails = {
+            type: messageType,
+            versionId: created.row.id,
+            version: created.row.version,
+          };
+
           response.statusCode = 200;
           response.body = JSON.stringify(created.row);
           break;
@@ -1298,6 +1304,9 @@ exports.handler = async (event) => {
           });
           break;
         }
+
+        // Only the settings that were changed and their new values are recorded
+        auditDetails = { changes: patch };
 
         response.statusCode = 200;
         response.body = JSON.stringify(updated[0]);

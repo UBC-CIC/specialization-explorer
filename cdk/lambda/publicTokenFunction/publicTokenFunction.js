@@ -50,6 +50,21 @@ const verifyUserKey = async (userId, userKey) => {
   return storedBuf.length === providedHash.length && crypto.timingSafeEqual(providedHash, storedBuf);
 };
 
+// Structured record of a credential check or token issuance. The presented key is never logged.
+const auditTokenEvent = (event, { outcome, userId, jti }) =>
+  console.log(
+    JSON.stringify({
+      audit: true,
+      timestamp: new Date().toISOString(),
+      requestId: event.requestContext?.requestId,
+      actor: userId || "anonymous",
+      sourceIp: event.requestContext?.identity?.sourceIp,
+      action: `${event.httpMethod} ${event.resource}`,
+      outcome,
+      ...(jti && { jti }),
+    })
+  );
+
 exports.handler = async (event) => {
   try {
     if (!cachedSecret || Date.now() > cacheExpiry) {
@@ -67,6 +82,10 @@ exports.handler = async (event) => {
     if (authHeader?.startsWith("UserKey ")) {
       const [userId, userKey] = authHeader.slice("UserKey ".length).trim().split(":");
       if (!UUID_REGEX.test(userId || "") || !userKey || !(await verifyUserKey(userId.toLowerCase(), userKey))) {
+        auditTokenEvent(event, {
+          outcome: "denied",
+          userId: UUID_REGEX.test(userId || "") ? userId.toLowerCase() : undefined,
+        });
         return {
           statusCode: 401,
           headers: await getCorsHeaders(event),
@@ -76,16 +95,18 @@ exports.handler = async (event) => {
       subject = userId.toLowerCase();
     }
 
+    const jti = randomUUID();
     const token = jwt.sign(
       {
         ...(subject && { sub: subject }),
         role: "user",
-        jti: randomUUID(),  // Unique token ID for tracing a token through the logs
+        jti,  // Unique token ID for tracing a token through the logs
         iat: Math.floor(Date.now() / 1000)  // Explicit issued-at timestamp
       },
       cachedSecret,
       { expiresIn: "15m", ...TOKEN_OPTIONS }  // Reduced to 15 minutes for better security
     );
+    auditTokenEvent(event, { outcome: "success", userId: subject, jti });
     return {
       statusCode: 200,
       headers: await getCorsHeaders(event),

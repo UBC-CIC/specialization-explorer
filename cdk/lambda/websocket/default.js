@@ -98,6 +98,7 @@ const notifyClient = async (connectionId, error, message) => {
 exports.handler = async (event) => {
   console.log("WebSocket message received:", {
     connectionId: event.requestContext.connectionId,
+    userId: event.requestContext.authorizer?.userId,
     routeKey: event.requestContext.routeKey,
     // Omit body to avoid logging sensitive data like user_id and chat_session_id
     timestamp: new Date().toISOString(),
@@ -175,7 +176,7 @@ exports.handler = async (event) => {
         return { statusCode: 503, body: JSON.stringify({ error: "Service unavailable" }) };
       }
       if (!allowed) {
-        console.warn("Message rate limit exceeded", { connectionId });
+        console.warn("Message rate limit exceeded", { connectionId, userId: authenticatedUserId });
         await notifyClient(connectionId, "RATE_LIMITED", RATE_LIMIT_MESSAGE);
         return { statusCode: 429, body: JSON.stringify({ error: "Rate limit exceeded" }) };
       }
