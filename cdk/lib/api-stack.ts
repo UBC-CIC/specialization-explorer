@@ -550,7 +550,8 @@ export class ApiGatewayStack extends cdk.Stack {
                         searchString: "/user",
                         fieldToMatch: { uriPath: {} },
                         textTransformations: [{ priority: 0, type: "NONE" }],
-                        positionalConstraint: "EXACTLY",
+                        // The inspected path starts with the stage name (/prod/user)
+                        positionalConstraint: "ENDS_WITH",
                       },
                     },
                   ],
@@ -582,7 +583,8 @@ export class ApiGatewayStack extends cdk.Stack {
                   searchString: "/user/publicToken",
                   fieldToMatch: { uriPath: {} },
                   textTransformations: [{ priority: 0, type: "NONE" }],
-                  positionalConstraint: "EXACTLY",
+                  // The inspected path starts with the stage name (/prod/user/publicToken)
+                  positionalConstraint: "ENDS_WITH",
                 },
               },
             },
