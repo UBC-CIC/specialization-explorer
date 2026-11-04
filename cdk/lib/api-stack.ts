@@ -546,12 +546,16 @@ export class ApiGatewayStack extends cdk.Stack {
                       },
                     },
                     {
-                      byteMatchStatement: {
-                        searchString: "/user",
+                      regexMatchStatement: {
+                        // The inspected path starts with the stage name (/prod/user). The path is
+                        // decoded and normalized first, and a trailing slash is allowed, so
+                        // /prod/user/, /prod//user and /prod/use%72 are counted too.
+                        regexString: "/user/*$",
                         fieldToMatch: { uriPath: {} },
-                        textTransformations: [{ priority: 0, type: "NONE" }],
-                        // The inspected path starts with the stage name (/prod/user)
-                        positionalConstraint: "ENDS_WITH",
+                        textTransformations: [
+                          { priority: 0, type: "URL_DECODE" },
+                          { priority: 1, type: "NORMALIZE_PATH" },
+                        ],
                       },
                     },
                   ],
@@ -579,12 +583,15 @@ export class ApiGatewayStack extends cdk.Stack {
               limit: 100,
               aggregateKeyType: "IP",
               scopeDownStatement: {
-                byteMatchStatement: {
-                  searchString: "/user/publicToken",
+                regexMatchStatement: {
+                  // The inspected path starts with the stage name (/prod/user/publicToken). It is
+                  // decoded and normalized first, and a trailing slash is allowed.
+                  regexString: "/user/publicToken/*$",
                   fieldToMatch: { uriPath: {} },
-                  textTransformations: [{ priority: 0, type: "NONE" }],
-                  // The inspected path starts with the stage name (/prod/user/publicToken)
-                  positionalConstraint: "ENDS_WITH",
+                  textTransformations: [
+                    { priority: 0, type: "URL_DECODE" },
+                    { priority: 1, type: "NORMALIZE_PATH" },
+                  ],
                 },
               },
             },
