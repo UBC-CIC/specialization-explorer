@@ -15,7 +15,43 @@ import {
   Provider,
 } from "aws-cdk-lib/custom-resources";
 
-const FALLBACK_URL = ["https://example.com"];
+// Web crawl data sources provisioned with the Knowledge Base. Each entry defines the
+// seed URLs to crawl, inclusion/exclusion filters, crawler rate and page limits, and a
+// chunking strategy for ingestion.
+const WEB_DATA_SOURCES = [
+  {
+    name: "department-webpages",
+    seedUrls: [
+      "https://www.eoas.ubc.ca/",
+      "https://www.cs.ubc.ca/",
+      "https://phas.ubc.ca/",
+      "https://www.math.ubc.ca/",
+      "https://geoeng.ubc.ca/",
+    ],
+    inclusionFilters: [".*undergrad.*"],
+    exclusionFilters: [".*\\.pdf$"],
+    rateLimit: 300,
+    maxPages: 25000,
+    // Omit chunking configuration so Bedrock applies its default strategy.
+    chunking: { strategy: "DEFAULT" },
+  },
+  {
+    name: "science-programs",
+    seedUrls: [
+      "https://students.ubc.ca/career/your-degree/science/",
+      "https://science.ubc.ca/",
+      "https://vancouver.calendar.ubc.ca/faculties-colleges-and-schools/faculty-science/bachelor-science",
+    ],
+    inclusionFilters: [
+      ".*(astronomy|atmospheric-science|behavioural-neuroscience|biochemistry|biology|biotechnology|botany|cellular-and-physiological-sciences|chemistry|cognitive-systems|combined-major-in-science|computer-science|data-science|earth-and-ocean-sciences|environmental-sciences|forensic-science|general-science|geographical-sciences|geological-sciences|geophysics|integrated-sciences|mathematics|microbiology-and-immunology|neuroscience|oceanography|pharmacology|physics|statistics|zoology).*",
+      ".*science\\.ubc\\.ca/(students|programs).*",
+    ],
+    exclusionFilters: [".*\\.pdf$", ".*science\\.ubc\\.ca.*(blog|alumni).*"],
+    rateLimit: 300,
+    maxPages: 25000,
+    chunking: { strategy: "HIERARCHICAL", levels: [1000, 500], overlapTokens: 60 },
+  },
+];
 
 // Bedrock KB / AOSS index settings
 const VECTOR_INDEX_NAME = "bedrock-knowledge-base-default-index";
@@ -343,8 +379,6 @@ export class KnowledgeBaseStack extends Stack {
     vectorIndexProvider.node.addDependency(networkPolicy);
     vectorIndexProvider.node.addDependency(dataAccessPolicy);
 
-    const webCrawlerUrls = FALLBACK_URL.join(",");
-
     // Role for Knowledge Base Provisioner Lambda
     const kbProvisionerRole = new iam.Role(this, "KBProvisionerRole", {
       assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
@@ -434,10 +468,9 @@ export class KnowledgeBaseStack extends Stack {
         S3BucketArn: this.knowledgeBaseBucket.bucketArn,
         // Bedrock reads only this prefix; presigned uploads land under quarantine/ until staging promotes them
         S3InclusionPrefix: "uploads/",
-        WebCrawlerUrls: webCrawlerUrls,
-        // If the placeholder URL is used, exclude everything so nothing gets crawled.
-        // When real URLs are set, no exclusion filter is applied.
-        WebCrawlerExclusionFilters: webCrawlerUrls.trim() === "https://example.com" ? "https://example\\.com.*" : "",
+        // Web crawl sources (seed URLs, inclusion/exclusion filters, crawler limits, chunking),
+        // passed as a JSON string so numeric limits survive CloudFormation property stringification.
+        WebDataSources: JSON.stringify(WEB_DATA_SOURCES),
       },
     });
 
