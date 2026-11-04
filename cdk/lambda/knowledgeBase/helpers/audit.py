@@ -66,3 +66,21 @@ def audit_log(event, status_code, privileged=False, details=None):
     if details:
         record["details"] = details
     logger.info(json.dumps(record))
+
+
+def audit_system_event(action, outcome="success", details=None):
+    """
+    Audit record for a privileged change made by the scheduler-driven workflow rather than an
+    HTTP request. Same record shape, with the scheduler as the actor.
+    """
+    record = {
+        "audit": True,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "actor": "system:ingestion-scheduler",
+        "actorRole": "system",
+        "action": action,
+        "outcome": outcome,
+    }
+    if details:
+        record["details"] = {k: _bounded(v) for k, v in details.items()}
+    logger.info(json.dumps(record))
