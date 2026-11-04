@@ -164,9 +164,10 @@ exports.handler = async (event) => {
       case "PUT /chat_sessions/{chat_session_id}": {
         const chatSessionId = event.pathParameters?.chat_session_id;
 
-        if (!chatSessionId) {
+        const sessionIdValidation = validateUUID(chatSessionId, "chat_session_id");
+        if (!sessionIdValidation.valid) {
           response.statusCode = 400;
-          response.body = JSON.stringify({ error: "chat_session_id is required" });
+          response.body = JSON.stringify({ error: sessionIdValidation.error });
           break;
         }
 
@@ -213,9 +214,10 @@ exports.handler = async (event) => {
       case "GET /chat_sessions/{chat_session_id}/chat_history": {
         const chatSessionId = event.pathParameters?.chat_session_id;
 
-        if (!chatSessionId) {
+        const sessionIdValidation = validateUUID(chatSessionId, "chat_session_id");
+        if (!sessionIdValidation.valid) {
           response.statusCode = 400;
-          response.body = JSON.stringify({ error: "chat_session_id is required" });
+          response.body = JSON.stringify({ error: sessionIdValidation.error });
           break;
         }
 
@@ -263,9 +265,10 @@ exports.handler = async (event) => {
       case "DELETE /chat_sessions/{chat_session_id}": {
         const chatSessionId = event.pathParameters?.chat_session_id;
 
-        if (!chatSessionId) {
+        const sessionIdValidation = validateUUID(chatSessionId, "chat_session_id");
+        if (!sessionIdValidation.valid) {
           response.statusCode = 400;
-          response.body = JSON.stringify({ error: "chat_session_id is required" });
+          response.body = JSON.stringify({ error: sessionIdValidation.error });
           break;
         }
 
