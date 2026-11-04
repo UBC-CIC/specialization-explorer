@@ -82,6 +82,7 @@ type AdminDataSourcesResponse = {
 
 type PresignedUploadResponse = {
   presignedUrl: string;
+  fields: Record<string, string>;
   bucket: string;
   key: string;
 };
@@ -89,6 +90,7 @@ type PresignedUploadResponse = {
 type BatchPresignedUrlEntry = {
   file_name: string;
   presigned_url: string;
+  fields: Record<string, string>;
   key: string;
   bucket: string;
 };
@@ -148,6 +150,17 @@ function formatSizeMb(file: File | null) {
   return `${(file.size / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+// Uploads to the presigned URL are limited by S3 to this size
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+// Builds the multipart body a presigned POST expects: the signed fields first, the file last
+function buildPresignedPostBody(fields: Record<string, string>, file: Blob): FormData {
+  const formData = new FormData();
+  Object.entries(fields).forEach(([name, value]) => formData.append(name, value));
+  formData.append("file", file);
+  return formData;
+}
+
 function isMarkdownFile(file: File) {
   const lower = file.name.toLowerCase();
   return lower.endsWith(".md") || lower.endsWith(".markdown") || file.type === "text/markdown";
@@ -161,7 +174,7 @@ function validatePrimaryFile(file: File): string | null {
   const valid = isCsvFile(file) || isMarkdownFile(file);
 
   if (!valid) return "Only CSV or Markdown files are allowed.";
-  if (file.size > 50 * 1024 * 1024) return "File size must be less than 50MB.";
+  if (file.size > MAX_UPLOAD_BYTES) return "File size must be less than 50MB.";
   return null;
 }
 
@@ -177,7 +190,7 @@ function validateMetadataFile(file: File): string | null {
     file.type === "text/json";
 
   if (!isJson) return "Only JSON metadata files are allowed.";
-  if (file.size > 50 * 1024 * 1024) return "Metadata JSON file size must be less than 50MB.";
+  if (file.size > MAX_UPLOAD_BYTES) return "Metadata JSON file size must be less than 50MB.";
   return null;
 }
 
@@ -523,21 +536,29 @@ export default function DataSourceManagement() {
     return (await res.json()) as PresignedUploadResponse;
   };
 
-  const uploadFileToS3 = async (
-    presignedUrl: string,
-    file: File,
-    fallbackContentType: string
-  ) => {
-    const uploadResponse = await fetch(presignedUrl, {
-      method: "PUT",
-      headers: {
-        "Content-Type": file.type || fallbackContentType,
-      },
-      body: file,
+  const uploadFileToS3 = async (upload: PresignedUploadResponse, file: File) => {
+    const uploadResponse = await fetch(upload.presignedUrl, {
+      method: "POST",
+      body: buildPresignedPostBody(upload.fields, file),
     });
 
     if (!uploadResponse.ok) {
       throw new Error(`Failed to upload ${file.name} to S3`);
+    }
+  };
+
+  const uploadZipEntry = async (
+    entry: BatchPresignedUrlEntry,
+    file: Blob,
+    fileName: string
+  ) => {
+    const uploadResponse = await fetch(entry.presigned_url, {
+      method: "POST",
+      body: buildPresignedPostBody(entry.fields, file),
+    });
+
+    if (!uploadResponse.ok) {
+      throw new Error(`Failed to upload ${fileName} to S3`);
     }
   };
 
@@ -697,16 +718,8 @@ export default function DataSourceManagement() {
           const primaryEntry = urlMap.get(p.primaryFile.name)!;
           const metaEntry = urlMap.get(p.metadataFile.name)!;
           return [
-            fetch(primaryEntry.presigned_url, {
-              method: "PUT",
-              headers: { "Content-Type": p.type === "csv" ? "text/csv" : "text/markdown" },
-              body: p.primaryFile,
-            }),
-            fetch(metaEntry.presigned_url, {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: p.metadataFile,
-            }),
+            uploadZipEntry(primaryEntry, p.primaryFile, p.primaryFile.name),
+            uploadZipEntry(metaEntry, p.metadataFile, p.metadataFile.name),
           ];
         })
       );
@@ -798,14 +811,10 @@ export default function DataSourceManagement() {
       const primaryType = getPrimaryFileType(primaryFile);
 
       const primaryUpload = await getPresignedUpload(token, primaryFile, primaryType);
-      await uploadFileToS3(
-        primaryUpload.presignedUrl,
-        primaryFile,
-        primaryType === "csv" ? "text/csv" : "text/markdown"
-      );
+      await uploadFileToS3(primaryUpload, primaryFile);
 
       const metadataUpload = await getPresignedUpload(token, metadataFile, "json");
-      await uploadFileToS3(metadataUpload.presignedUrl, metadataFile, "application/json");
+      await uploadFileToS3(metadataUpload, metadataFile);
 
       const body =
         primaryType === "csv"

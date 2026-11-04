@@ -12,6 +12,9 @@ logger.setLevel(logging.INFO)
 BUCKET = os.environ["KNOWLEDGE_BASE_BUCKET_NAME"]
 REGION = os.environ["REGION"]
 
+# Largest object a presigned upload may carry; enforced by S3 through the signed POST policy
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
 ALLOWED_CONTENT_TYPES = {
     "text/csv",
     "text/markdown",
@@ -100,22 +103,23 @@ def generate_presigned_url(event):
     key = f"{prefix}/{timestamp}_{file_name}"
 
     try:
-        presigned_url = s3.generate_presigned_url(
-            ClientMethod="put_object",
-            Params={
-                "Bucket": BUCKET,
-                "Key": key,
-                "ContentType": content_type,
-            },
+        presigned_post = s3.generate_presigned_post(
+            Bucket=BUCKET,
+            Key=key,
+            Fields={"Content-Type": content_type},
+            Conditions=[
+                {"Content-Type": content_type},
+                ["content-length-range", 0, MAX_UPLOAD_BYTES],
+            ],
             ExpiresIn=300,
-            HttpMethod="PUT",
         )
 
         return _response(
             event,
             200,
             {
-                "presignedUrl": presigned_url,
+                "presignedUrl": presigned_post["url"],
+                "fields": presigned_post["fields"],
                 "key": key,
                 "bucket": BUCKET,
             },
