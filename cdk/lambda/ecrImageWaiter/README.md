@@ -2,203 +2,103 @@
 
 ## Purpose
 
-This custom resource prevents deployment race conditions where Docker-based Lambda functions are created before their container images are built and pushed to ECR.
+This custom resource prevents a first-deployment race condition: the container-image Lambda for the vector index manager (`vectorIndexManagerSigV4`) cannot be created until CodePipeline has built and pushed its image to ECR.
 
 ## Problem
 
-When deploying CDK stacks with the following dependency chain:
+The stacks are deployed in this order:
 
-1. **CICD Stack** creates ECR repositories and CodePipeline
-2. **API Stack** creates Docker-based Lambda functions that reference ECR images
+1. **CICD stack** creates the ECR repository and the CodePipeline that builds the image.
+2. **KnowledgeBase stack** creates the `VectorIndexManagerFn` Docker image Lambda from the `latest` tag of that repository.
 
-CloudFormation's stack dependency (`apiStack.addDependency(cicdStack)`) only ensures the CICD stack **resources** are created (ECR repos, pipeline definition), but **NOT** that the pipeline has actually run and built the images.
-
-This causes the API stack deployment to fail on first run because:
-
-- ECR repositories exist ✅
-- Docker images in those repositories do NOT exist ❌
-- Lambda functions cannot be created without valid images ❌
+The stack dependency (`kbStack.addDependency(cicdStack)` in `bin/cdk.ts`) only guarantees that the repository and pipeline exist. It does not guarantee that the pipeline has run, so on a first deployment the repository is empty and the Lambda cannot be created.
 
 ## Solution
 
-The ECR Image Waiter custom resource:
+The waiter custom resource (`KBEcrImageWaiter` in `lib/knowledge-base-stack.ts`):
 
-1. **Waits** for Docker images to exist in ECR repositories
-2. **Retries** with configurable delay (default: 30 seconds between retries)
-3. **Times out** after a configurable period (default: 30 minutes)
-4. **Blocks** the creation of Docker Lambda functions until images are confirmed to exist
+1. Checks the repository for the `latest` image tag.
+2. If the image is missing, starts the pipeline (`TriggerBuildOnMissing: "true"` with `CodePipelineName`).
+3. Checks again every 30 seconds, up to 28 times (about 14 minutes, inside the Lambda's 15-minute timeout).
+4. Succeeds as soon as the image exists. `VectorIndexManagerFn` depends on the waiter, so CloudFormation creates it only after that.
+
+If the image never appears, the custom resource fails and CloudFormation rolls back the KnowledgeBase stack.
 
 ## Architecture
 
 ```
-┌─────────────────────┐
-│   CICD Stack        │
-│                     │
-│ ┌─────────────────┐ │
-│ │ ECR Repos       │ │
-│ │ - textGen       │ │
-│ │ - pracMaterial  │ │
-│ └─────────────────┘ │
-│                     │
-│ ┌─────────────────┐ │
-│ │ CodePipeline    │ │
-│ │ (builds images) │ │
-│ └─────────────────┘ │
-└─────────────────────┘
-          │
-          │ Stack dependency
-          ▼
-┌─────────────────────┐
-│   API Stack         │
-│                     │
-│ ┌─────────────────┐ │
-│ │ Image Waiter    │ │◄── Custom Resource Lambda
-│ │ Custom Resource │ │    (checks ECR for images)
-│ └─────────────────┘ │
-│          │          │
-│          │ Dependency
-│          ▼          │
-│ ┌─────────────────┐ │
-│ │ Docker Lambda   │ │
-│ │ Functions       │ │
-│ └─────────────────┘ │
-└─────────────────────┘
+┌──────────────────────────┐
+│   CICD Stack             │
+│  ECR repo                │
+│  (vectorIndexManagerSigV4)│
+│  CodePipeline            │
+└────────────┬─────────────┘
+             │ stack dependency
+             ▼
+┌──────────────────────────┐
+│   KnowledgeBase Stack    │
+│  KBEcrImageWaiter ───────┼──► starts the pipeline if the image is missing,
+│        │                 │    then polls ECR
+│        ▼ dependency      │
+│  VectorIndexManagerFn    │
+│  (Docker image Lambda)   │
+└──────────────────────────┘
 ```
 
 ## Implementation
 
 ### Files
 
-- **`lambda/ecrImageWaiter/index.js`**: Custom resource Lambda handler
-- **`lambda/ecrImageWaiter/package.json`**: Dependencies (@aws-sdk/client-ecr)
-- **`lib/api-stack.ts`**:
-  - Creates the ECR Image Waiter Lambda function
-  - Creates custom resources for each Docker image
-  - Adds dependencies to Docker Lambda functions
+- `lambda/ecrImageWaiter/index.js`: custom resource handler
+- `lambda/ecrImageWaiter/package.json`: dependencies (`@aws-sdk/client-ecr`, `@aws-sdk/client-codepipeline`, `@aws-sdk/client-codebuild`)
+- `lib/knowledge-base-stack.ts`: creates the waiter role (`KBEcrImageWaiterRole`), function (`KBEcrImageWaiterFn`) and custom resource (`KBEcrImageWaiter`)
 
 ### Custom Resource Properties
 
-| Property            | Type   | Default  | Description                            |
-| ------------------- | ------ | -------- | -------------------------------------- |
-| `RepositoryName`    | String | Required | ECR repository name to check           |
-| `ImageTag`          | String | Required | Image tag to look for (e.g., "latest") |
-| `MaxRetries`        | String | "60"     | Maximum number of retry attempts       |
-| `RetryDelaySeconds` | String | "30"     | Seconds to wait between retries        |
+| Property                | Type   | Handler default | Value used     | Description                                                    |
+| ----------------------- | ------ | --------------- | -------------- | -------------------------------------------------------------- |
+| `RepositoryName`        | String | Required        | Repository name | ECR repository to check                                       |
+| `ImageTag`              | String | Required        | `latest`       | Image tag to look for                                          |
+| `MaxRetries`            | String | `"60"`          | `"28"`         | Maximum number of checks                                       |
+| `RetryDelaySeconds`     | String | `"30"`          | `"30"`         | Seconds between checks                                         |
+| `TriggerBuildOnMissing` | String | `"false"`       | `"true"`       | Start a build when the image is missing                        |
+| `CodePipelineName`      | String | none            | `<StackPrefix>-CICD-DockerImagePipeline` | Pipeline to start                    |
+| `CodeBuildProjectName`  | String | none            | not set        | Used instead of the pipeline when `CodePipelineName` is unset  |
 
-### Default Behavior
-
-- **Max wait time**: 30 minutes (60 retries × 30 seconds)
-- **Check interval**: Every 30 seconds
-- **On timeout**: CloudFormation rollback (deployment fails gracefully)
-
-## How It Works
-
-1. **API Stack deployment starts**
-2. **Custom resource Lambda is created** (ecrImageWaiter)
-3. **Custom resource invoked** for each Docker image:
-   - Checks if image exists in ECR
-   - If not found, waits 30 seconds and retries
-   - Continues until image found or timeout
-4. **On success**: CloudFormation proceeds to create Docker Lambda functions
-5. **On failure**: CloudFormation rolls back the stack
+Keep `MaxRetries × RetryDelaySeconds` below the function's 15-minute timeout; a larger value would let Lambda time out before the waiter reports a result.
 
 ## Deployment Workflow
 
 ### First-Time Deployment
 
-```bash
-# 1. Deploy CICD stack (creates repos and pipeline)
-npx cdk deploy specEx-CICD
+`npx cdk deploy --all` handles this automatically, provided the GitHub connection created by the CICD stack has been authorized (see the Deployment Guide). An unauthorized connection is the most common reason the pipeline fails and the waiter times out.
 
-# 2. Trigger the pipeline (or wait for automatic webhook trigger)
-# The pipeline will build and push Docker images
-
-# 3. Deploy API stack
-# The custom resource will wait for images, then create Lambda functions
-npx cdk deploy specEx-Api
-```
+To avoid the wait, authorize the connection and click **Release change** on `<StackPrefix>-CICD-DockerImagePipeline` as soon as the CICD stack finishes.
 
 ### Subsequent Deployments
 
-The custom resource gracefully handles existing images, so subsequent deployments work normally without waiting.
+The image already exists, so the waiter succeeds on its first check.
 
 ## Monitoring
 
-### CloudWatch Logs
-
-The image waiter Lambda logs to CloudWatch:
-
-- **Log Group**: `/aws/lambda/<StackPrefix>-Api-EcrImageWaiter`
-- **Log content**:
-  - Image check attempts
-  - Retry count and delay
-  - Success or failure status
-
-### CloudFormation Events
-
-Watch CloudFormation stack events to see:
-
-- Custom resource CREATE_IN_PROGRESS (waiting for image)
-- Custom resource CREATE_COMPLETE (image found)
-- Lambda function CREATE_IN_PROGRESS (proceeding with deployment)
+- **CloudWatch Logs**: the waiter function's log group (`/aws/lambda/<StackPrefix>-KnowledgeBase-KBEcrImageWaiterFn...`) shows each check, the retry count, and whether the pipeline was started.
+- **CloudFormation events**: `KBEcrImageWaiter` stays in `CREATE_IN_PROGRESS` while it waits.
 
 ## Troubleshooting
 
-### Symptom: Stack times out after 30 minutes
+### The KnowledgeBase stack fails after about 14 minutes
 
-**Cause**: CodePipeline hasn't built the images yet
+The pipeline has not pushed the image yet.
 
-**Solutions**:
+1. Open `<StackPrefix>-CICD-DockerImagePipeline` in CodePipeline and check the last execution.
+2. If the Source stage failed, authorize the GitHub connection, then click **Release change**.
+3. If the Build stage failed, read the CodeBuild logs. The build also fails when the image scan finds CRITICAL vulnerabilities, in which case `latest` is not moved.
+4. When the image is in ECR, redeploy: `npx cdk deploy <StackPrefix>-KnowledgeBase`.
 
-1. Check CodePipeline execution status in AWS Console
-2. Ensure pipeline triggered correctly and isn't stuck
-3. Manually trigger the pipeline before deploying API stack
-4. Increase `MaxRetries` if pipeline takes longer than 30 minutes
+### The custom resource fails immediately
 
-### Symptom: Custom resource fails immediately
+A missing image or repository is retried, so an immediate failure comes from another ECR error, usually access denied. The log shows the error. Check that the CICD stack deployed successfully and that the waiter role can read the repository.
 
-**Cause**: ECR repository doesn't exist
+### The image exists but the waiter still times out
 
-**Solution**: Ensure CICD stack deployed successfully first
-
-### Symptom: Image exists but waiter still times out
-
-**Cause**: IAM permissions issue
-
-**Solution**: Verify the ecrImageWaiterRole has:
-
-- `ecr:DescribeImages`
-- `ecr:DescribeRepositories`
-- `ecr:BatchGetImage`
-
-## Configuration
-
-To adjust wait times, modify the custom resource properties in `api-stack.ts`:
-
-```typescript
-const textGenImageWaiter = new cdk.CustomResource(this, "TextGenImageWaiter", {
-  serviceToken: ecrImageWaiterFunction.functionArn,
-  properties: {
-    RepositoryName: props.ecrRepositories["textGeneration"].repositoryName,
-    ImageTag: "latest",
-    MaxRetries: "120", // Double the retries (60 minutes total)
-    RetryDelaySeconds: "30",
-  },
-});
-```
-
-## Benefits
-
-✅ **Prevents race conditions** between stack deployment and image building  
-✅ **Automatic waiting** - no manual intervention needed  
-✅ **Graceful failure** - CloudFormation rolls back if images never appear  
-✅ **Idempotent** - works for both first-time and subsequent deployments  
-✅ **Configurable timeouts** - adjust to your pipeline build times
-
-## Cost Considerations
-
-- **Lambda invocations**: 2 custom resource invocations per deployment
-- **Lambda duration**: Up to 15 minutes per invocation (mostly waiting/sleeping)
-- **CloudWatch Logs**: Minimal logging overhead
-
-**Estimated cost**: < $0.01 per deployment
+Check that `KBEcrImageWaiterRole` has `ecr:DescribeImages` on the repository and `codepipeline:StartPipelineExecution` on the pipeline.

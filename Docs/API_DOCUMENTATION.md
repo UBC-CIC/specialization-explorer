@@ -13,16 +13,28 @@ This document provides comprehensive documentation for the Specialization Explor
 - [Chat Session Endpoints](#chat-session-endpoints)
 - [System Message Endpoints](#system-message-endpoints)
 - [Admin Endpoints](#admin-endpoints)
+- [Security Considerations](#security-considerations)
+- [WebSocket API](#websocket-api)
+- [Troubleshooting](#troubleshooting)
 
 ## Authentication
 
-All API endpoints (except public ones) require authentication using AWS Cognito JWT tokens passed in the `Authorization` header.
+The API has two kinds of callers, each with its own token in the `Authorization` header:
+
+- **Students** are anonymous. They use a short-lived HS256 token from `GET /user/publicToken`, sent as `Authorization: Bearer <token>`.
+- **Administrators** sign in with AWS Cognito (SRP and TOTP MFA) and send their Cognito ID token as `Authorization: <id-token>`.
 
 ---
 
-### Obtaining a Token
+### Obtaining a Student Token
 
-Users authenticate through AWS Cognito and receive an ID token used for all API requests.
+1. Call `GET /user/publicToken` with no `Authorization` header. The result is an **anonymous** token, which can only call `POST /user`, `GET /system_message/{message_type}` and `GET /system-settings/*`.
+2. Call `POST /user` with the anonymous token. The response contains `userId` and a random `userKey`. Store both; the server keeps only a SHA-256 hash of the key.
+3. Call `GET /user/publicToken` with `Authorization: UserKey <userId>:<userKey>`. The result is a token **bound to the user** (`sub` = `userId`), which can call every user-tier endpoint for that user.
+
+Tokens expire after 15 minutes; request a new one with the same `UserKey` header. Rotate the key with `POST /user/{user_id}/key`.
+
+### Obtaining an Administrator Token
 
 ```javascript
 // JavaScript example using AWS Amplify
@@ -38,10 +50,10 @@ const token = session.tokens?.idToken?.toString();
 
 The API uses two custom Lambda authorizers:
 
-- **adminAuthorizer**: Validates the user has admin privileges. Required for all `/admin/*` endpoints.
-- **userAuthorizer**: Validates any authenticated user. Required for user, chat session, system message, and analytics endpoints.
+- **adminAuthorizer**: Verifies a Cognito ID token whose user is in the `admin` group. Required for all `/admin/*` endpoints. It passes the caller's verified `email` to the handlers, which use it (never the request body) to identify the administrator.
+- **userAuthorizer**: Verifies a student token. Required for the user, chat session, system message and `/system-settings/*` endpoints. It passes only the bound `userId`, and every handler checks that the requested user or chat session belongs to it. Student tokens are always denied on `/admin/*`.
 
-Public endpoints (`/user/publicToken`, `/public/*`) require no authentication.
+`GET /user/publicToken` requires no authentication.
 
 ## Base URL
 
@@ -54,7 +66,8 @@ Replace `{api-id}` and `{region}` with your API Gateway deployment values (found
 ## Common Headers
 
 ```
-Authorization: {cognito-id-token}
+Authorization: Bearer {student-token}      # user-tier endpoints
+Authorization: {cognito-id-token}          # /admin/* endpoints
 Content-Type: application/json
 ```
 
@@ -76,7 +89,11 @@ Content-Type: application/json
 - `403` - Forbidden (insufficient permissions)
 - `404` - Not Found
 - `409` - Conflict (e.g. duplicate resource)
+- `429` - Too Many Requests (per-user message rate limit or daily message quota)
 - `500` - Internal Server Error
+- `503` - Service Unavailable (the rate limit could not be checked)
+
+Requests blocked by AWS WAF rate rules receive `403` from WAF.
 
 ---
 
@@ -86,9 +103,15 @@ These endpoints require no authentication.
 
 ## Get Public Token
 
-Returns a JWT token for non-authenticated (guest) users.
+Returns a 15-minute HS256 token for students. Without a header the token is anonymous; with a valid `UserKey` header it is bound to that user.
 
 **Endpoint:** `GET /user/publicToken`
+
+**Headers (optional):**
+
+```
+Authorization: UserKey {userId}:{userKey}
+```
 
 **Response:**
 
@@ -96,21 +119,24 @@ Returns a JWT token for non-authenticated (guest) users.
 { "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." }
 ```
 
+Returns `401` with `{ "error": "Invalid user credentials" }` if the `UserKey` header does not match the stored key hash (including users whose key was revoked).
+
 **Example (cURL):**
 
 ```bash
-curl -X GET "https://{api-id}.execute-api.{region}.amazonaws.com/prod/user/publicToken"
+curl -X GET "https://{api-id}.execute-api.{region}.amazonaws.com/prod/user/publicToken" \
+  -H "Authorization: UserKey uuid:userKey"
 ```
 
 ---
 
 # User Endpoints
 
-These endpoints require a valid Cognito token (`userAuthorizer`).
+These endpoints require a student token (`userAuthorizer`). `POST /user` accepts an anonymous token; the others need a token bound to the `user_id` in the path, and return `401` for an anonymous token and `403` for another user's ID.
 
 ## Create User
 
-Create a new user record (guest or student).
+Create a new anonymous student record and its user key.
 
 **Endpoint:** `POST /user`
 
@@ -118,7 +144,6 @@ Create a new user record (guest or student).
 
 ```json
 {
-  "role": "student",
   "email": "student@example.com",
   "display_name": "Jane Doe"
 }
@@ -126,52 +151,79 @@ Create a new user record (guest or student).
 
 **Parameters:**
 
-- `role` (string, optional): `student` or `admin` — defaults to `student`
-- `email` (string, optional): User email
-- `display_name` (string, optional): Display name
+- `email` (string, optional): Unverified contact email, stored as `metadata.contact_email` (never as `users.email`)
+- `display_name` (string, optional): Display name, at most 100 characters
+
+The role is always `student`; a `role` field in the body is ignored.
 
 **Response:**
 
 ```json
 {
   "userId": "uuid",
-  "role": "student",
+  "userKey": "64 hex characters",
   "email": "student@example.com",
   "display_name": "Jane Doe",
+  "role": "student",
   "created_at": "2024-01-15T10:30:00.000Z",
-  "last_seen_at": "2024-01-15T10:30:00.000Z"
+  "last_seen_at": "2024-01-15T10:30:00.000Z",
+  "metadata": { "contact_email": "student@example.com" }
 }
 ```
+
+`userKey` is returned only here and by key rotation. Exchange it at `GET /user/publicToken` for a token bound to the user.
 
 **Example (cURL):**
 
 ```bash
 curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/user" \
-  -H "Authorization: eyJraWQiOiJ..." \
+  -H "Authorization: Bearer {anonymous-token}" \
   -H "Content-Type: application/json" \
-  -d '{"role": "student", "email": "student@example.com"}'
+  -d '{}'
 ```
 
 ---
 
 ## Get User
 
-Retrieve a user by ID.
+Retrieve the calling user. Also updates `last_seen_at`.
 
 **Endpoint:** `GET /user/{user_id}`
 
 **Path Parameters:**
 
-- `user_id` (uuid, required): The user's UUID
+- `user_id` (uuid, required): The caller's UUID
 
-**Response:** `200 OK` with user object
+**Response:** `200 OK` with `id`, `email` (the contact email, if any), `display_name`, `role`, `created_at`, `last_seen_at`, `messages_sent`, `messages_window_started_at` and `metadata`
 
 **Example (cURL):**
 
 ```bash
 curl -X GET "https://{api-id}.execute-api.{region}.amazonaws.com/prod/user/uuid" \
-  -H "Authorization: eyJraWQiOiJ..."
+  -H "Authorization: Bearer {user-token}"
 ```
+
+---
+
+## Rotate User Key
+
+Replace the user's key. The caller must present the current key in addition to a token bound to the user. The previous key stops working immediately.
+
+**Endpoint:** `POST /user/{user_id}/key`
+
+**Request Body:**
+
+```json
+{ "currentKey": "current user key" }
+```
+
+**Response:**
+
+```json
+{ "userKey": "new user key" }
+```
+
+Returns `401` if `currentKey` does not match, and `409` if another rotation changed the key at the same time.
 
 ---
 
@@ -197,7 +249,7 @@ Save a contact email for an anonymous user. The address is unverified and is sto
 
 ```bash
 curl -X PUT "https://{api-id}.execute-api.{region}.amazonaws.com/prod/user/uuid" \
-  -H "Authorization: eyJraWQiOiJ..." \
+  -H "Authorization: Bearer {user-token}" \
   -H "Content-Type: application/json" \
   -d '{"email": "newemail@example.com"}'
 ```
@@ -250,18 +302,18 @@ Get paginated message history for a chat session owned by a user.
 
 ```bash
 curl -X GET "https://{api-id}.execute-api.{region}.amazonaws.com/prod/user/uuid/chat_sessions/uuid/chat_history?limit=50&offset=0" \
-  -H "Authorization: eyJraWQiOiJ..."
+  -H "Authorization: Bearer {user-token}"
 ```
 
 ---
 
 # Chat Session Endpoints
 
-These endpoints require a valid Cognito token (`userAuthorizer`).
+These endpoints require a student token bound to a user (`userAuthorizer`). The owner is always the user in the token; an anonymous token gets `401`, and a session owned by another user gets `403`.
 
 ## Create Chat Session
 
-Create a new chat session for a user.
+Create a new chat session for the calling user.
 
 **Endpoint:** `POST /chat_sessions`
 
@@ -269,7 +321,6 @@ Create a new chat session for a user.
 
 ```json
 {
-  "user_id": "uuid",
   "title": "My first chat",
   "metadata": {}
 }
@@ -277,11 +328,10 @@ Create a new chat session for a user.
 
 **Parameters:**
 
-- `user_id` (uuid, required): Owner's UUID
 - `title` (string, optional): Chat session title
-- `metadata` (object, optional): Arbitrary metadata
+- `metadata` (object, optional): Arbitrary metadata (size-limited)
 
-**Response:**
+**Response:** `201 Created`
 
 ```json
 {
@@ -290,7 +340,7 @@ Create a new chat session for a user.
   "title": "My first chat",
   "created_at": "2024-01-15T10:30:00.000Z",
   "last_active_at": "2024-01-15T10:30:00.000Z",
-  "metadata": null
+  "metadata": {}
 }
 ```
 
@@ -298,22 +348,22 @@ Create a new chat session for a user.
 
 ```bash
 curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/chat_sessions" \
-  -H "Authorization: eyJraWQiOiJ..." \
+  -H "Authorization: Bearer {user-token}" \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "uuid", "title": "My first chat"}'
+  -d '{"title": "My first chat"}'
 ```
 
 ---
 
 ## Get Chat Sessions for User
 
-Get all chat sessions belonging to a user.
+Get all chat sessions belonging to the calling user, newest first.
 
 **Endpoint:** `GET /chat_sessions/user/{user_id}`
 
 **Path Parameters:**
 
-- `user_id` (uuid, required): User UUID
+- `user_id` (uuid, required): The caller's UUID
 
 **Response:** `200 OK` with list of chat session objects
 
@@ -321,7 +371,7 @@ Get all chat sessions belonging to a user.
 
 ```bash
 curl -X GET "https://{api-id}.execute-api.{region}.amazonaws.com/prod/chat_sessions/user/uuid" \
-  -H "Authorization: eyJraWQiOiJ..."
+  -H "Authorization: Bearer {user-token}"
 ```
 
 ---
@@ -336,23 +386,19 @@ Rename a chat session. Only the owning user may update.
 
 - `chat_session_id` (uuid, required): Chat session UUID
 
-**Query Parameters:**
-
-- `user_id` (uuid, required): Owner's UUID (used to verify ownership)
-
 **Request Body:**
 
 ```json
 { "title": "Renamed session" }
 ```
 
-**Response:** `200 OK`
+**Response:** `200 OK` with the updated chat session object
 
 **Example (cURL):**
 
 ```bash
-curl -X PUT "https://{api-id}.execute-api.{region}.amazonaws.com/prod/chat_sessions/uuid?user_id=uuid" \
-  -H "Authorization: eyJraWQiOiJ..." \
+curl -X PUT "https://{api-id}.execute-api.{region}.amazonaws.com/prod/chat_sessions/uuid" \
+  -H "Authorization: Bearer {user-token}" \
   -H "Content-Type: application/json" \
   -d '{"title": "Renamed session"}'
 ```
@@ -361,7 +407,7 @@ curl -X PUT "https://{api-id}.execute-api.{region}.amazonaws.com/prod/chat_sessi
 
 ## Delete Chat Session
 
-Delete a chat session. Only the owning user may delete.
+Delete a chat session and its messages. Only the owning user may delete.
 
 **Endpoint:** `DELETE /chat_sessions/{chat_session_id}`
 
@@ -369,24 +415,20 @@ Delete a chat session. Only the owning user may delete.
 
 - `chat_session_id` (uuid, required): Chat session UUID
 
-**Query Parameters:**
-
-- `user_id` (uuid, required): Owner's UUID (used to verify ownership)
-
 **Response:** `204 No Content`
 
 **Example (cURL):**
 
 ```bash
-curl -X DELETE "https://{api-id}.execute-api.{region}.amazonaws.com/prod/chat_sessions/uuid?user_id=uuid" \
-  -H "Authorization: eyJraWQiOiJ..."
+curl -X DELETE "https://{api-id}.execute-api.{region}.amazonaws.com/prod/chat_sessions/uuid" \
+  -H "Authorization: Bearer {user-token}"
 ```
 
 ---
 
 ## Generate Text Response
 
-Generate an AI response for a message in a chat session.
+Generate an AI response for a message in a chat session, without streaming. The chat page uses the [WebSocket API](#websocket-api) and falls back to this endpoint when streaming is not available. REST replies are capped at about 1,200 output tokens so they finish within the API Gateway timeout.
 
 **Endpoint:** `POST /chat_sessions/{chat_session_id}/text_generation`
 
@@ -399,52 +441,54 @@ Generate an AI response for a message in a chat session.
 ```json
 {
   "query": "What specializations are available in Computer Science?",
-  "user_id": "uuid"
+  "message_id": "uuid"
 }
 ```
 
 **Parameters:**
 
-- `query` (string, required): The user's message
-- `user_id` (uuid, optional): User UUID
+- `query` (string, required): The user's message. Limited to the `max_characters_per_user_message` setting; NUL characters are rejected.
 - `message_id` (uuid, optional): Client-generated id saved as the user message's id. A request that repeats an id that is already saved returns `409` with `"error": "DUPLICATE_MESSAGE"` and is not answered again.
+- `is_intro_message` (boolean, optional): Set by the app for its fixed opening prompt. Ignored unless the query matches that prompt exactly.
 
 **Response:**
 
 ```json
 {
   "response": "There are several specializations available...",
-  "sources": []
+  "sources": [],
+  "warning": null,
+  "chat_session_id": "uuid",
+  "token_usage": {}
 }
 ```
+
+`warning` holds the partial or full hallucination warning when the answer is not well grounded. The endpoint returns `429` with `"error": "RATE_LIMITED"` above 10 messages a minute per user, and `429` with `"error": "TOKEN_LIMIT_EXCEEDED"` when the daily message quota (`max_messages_per_day`) is used up.
 
 **Example (cURL):**
 
 ```bash
 curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/chat_sessions/uuid/text_generation" \
-  -H "Authorization: eyJraWQiOiJ..." \
+  -H "Authorization: Bearer {user-token}" \
   -H "Content-Type: application/json" \
-  -d '{"query": "What specializations are available?", "user_id": "uuid"}'
+  -d '{"query": "What specializations are available?"}'
 ```
 
 ---
 
 # System Message Endpoints
 
-These endpoints require a valid Cognito token (`userAuthorizer`).
+These endpoints require a student token (`userAuthorizer`); an anonymous token is enough.
 
 ## Get Active System Message
 
-Get the currently active version of a system message by type.
+Get the currently active version of a UI system message by type. Messages that shape the prompt are only available through the admin routes.
 
 **Endpoint:** `GET /system_message/{message_type}`
 
 **Path Parameters:**
 
-- `message_type` (string, required): One of:
-  - `disclaimer`, `guardrails`, `system_role`, `system_checklist`, `system_instructions`
-  - `initial_prompt`, `detective_phase_prompt`, `suggestion_phase_prompt`
-  - `welcome_message`, `partial_hallucination_warning`, `full_hallucination_warning`
+- `message_type` (string, required): `disclaimer` or `welcome_message`. Any other type returns `400`.
 
 **Response:**
 
@@ -462,29 +506,43 @@ Get the currently active version of a system message by type.
 
 ```bash
 curl -X GET "https://{api-id}.execute-api.{region}.amazonaws.com/prod/system_message/disclaimer" \
-  -H "Authorization: eyJraWQiOiJ..."
+  -H "Authorization: Bearer {user-token}"
+```
+
+---
+
+## Get Maximum User Message Length
+
+Return the current `max_characters_per_user_message` setting, used by the chat input.
+
+**Endpoint:** `GET /system-settings/max-characters-per-user-message`
+
+**Response:**
+
+```json
+{ "max_characters_per_user_message": 2000 }
 ```
 
 ---
 
 # Admin Endpoints
 
-All admin endpoints require a valid Cognito token with admin privileges (`adminAuthorizer`).
+All admin endpoints require a Cognito ID token for a member of the `admin` group (`adminAuthorizer`). Endpoints that change data also require the caller's e-mail to exist in `users` with the `admin` role, which `POST /admin/promote_user` records at sign-in. The caller is always identified from the token; no endpoint takes the administrator's e-mail from the request. Every admin request is written to the audit log.
 
 ## User Management
 
 ### List Users
 
-Get a paginated list of all users.
+Get a paginated list of all users, most recently active first.
 
 **Endpoint:** `GET /admin/users`
 
 **Query Parameters:**
 
-- `limit` (integer, optional): Number of users to return (default: 50)
+- `limit` (integer, optional): Number of users to return (default: 50, max: 100)
 - `offset` (integer, optional): Number of users to skip (default: 0)
 
-**Response:** `200 OK` with list of user objects
+**Response:** `200 OK` with a list of `{ id, email, display_name, role, created_at, last_seen_at, user_number }`, where `user_number` numbers users by creation order (oldest = 1)
 
 **Example (cURL):**
 
@@ -527,7 +585,7 @@ Get all chat sessions for a specific user.
 - `limit` (integer, optional): Default 50
 - `offset` (integer, optional): Default 0
 
-**Response:** `200 OK` with list of chat session objects
+**Response:** `200 OK` with a list of `{ id, user_id, title, created_at, last_active_at, chat_number }`, most recently active first, where `chat_number` numbers the user's sessions by creation order (oldest = 1)
 
 ---
 
@@ -546,7 +604,7 @@ Get all messages for a specific chat session.
 - `limit` (integer, optional): Default 200
 - `offset` (integer, optional): Default 0
 
-**Response:** `200 OK` with list of message objects
+**Response:** `200 OK` with a list of `{ id, chat_session_id, sender, content, sources, created_at }` in chronological order
 
 ---
 
@@ -570,8 +628,8 @@ List all data sources with their latest ingestion run status.
         "type": "website",
         "created_at": "2024-01-15T10:30:00.000Z",
         "metadata": {},
-        "include_patterns": null,
-        "exclude_patterns": null
+        "include_patterns": ["..."],
+        "exclude_patterns": ["..."]
       },
       "latest_ingestion_run": {
         "id": "uuid",
@@ -586,6 +644,8 @@ List all data sources with their latest ingestion run status.
 }
 ```
 
+`include_patterns` and `exclude_patterns` are omitted when the source has none, and `latest_ingestion_run` is `null` for a source with no runs. Sources are listed newest first.
+
 **Example (cURL):**
 
 ```bash
@@ -597,7 +657,7 @@ curl -X GET "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/data
 
 ### Stage Data Sources
 
-Stage a new data source (website or CSV) for future syncing.
+Stage a new data source (website, CSV or Markdown) for the next sync. Files must first be uploaded with a presigned POST; staging copies them from `quarantine/` to `uploads/`, the only prefix Bedrock reads.
 
 **Endpoint:** `POST /admin/data_sources`
 
@@ -606,10 +666,9 @@ Stage a new data source (website or CSV) for future syncing.
 ```json
 {
   "type": "website",
-  "created_by": "admin@example.com",
-  "name": "https://example.com",
-  "include_patterns": ["/docs/*"],
-  "exclude_patterns": ["/blog/*"]
+  "name": "https://example.com/science/",
+  "include_patterns": ["^https://example\\.com/science/.*"],
+  "exclude_patterns": [".*\\.pdf$"]
 }
 ```
 
@@ -618,32 +677,36 @@ Stage a new data source (website or CSV) for future syncing.
 ```json
 {
   "type": "csv",
-  "created_by": "admin@example.com",
   "csv_file_name": "data.csv",
   "csv_s3_bucket": "my-kb-bucket",
   "csv_s3_key": "quarantine/csv/1712345678_data.csv",
+  "metadata_file_name": "data.csv.metadata.json",
+  "metadata_s3_bucket": "my-kb-bucket",
   "metadata_s3_key": "quarantine/json/1712345678_data.csv.metadata.json"
 }
 ```
 
 **Parameters:**
 
-- `type` (string, required): `website` or `csv`
-- `created_by` (string, required): Admin email
-- `name` (string, optional): URL for website sources
-- `include_patterns` / `exclude_patterns` (array, optional): URL path filters for web crawling
+- `type` (string, required): `website`, `csv` or `markdown`
+- `name` (string, required for websites): `http(s)` URL, at most 2,048 characters
+- `include_patterns` / `exclude_patterns` (array, optional): Up to 20 crawler regular expressions each, at most 500 characters; an include pattern may not match every URL
 - `csv_file_name`, `csv_s3_bucket`, `csv_s3_key` (string): Required for CSV sources
-- `metadata_file_name`, `metadata_s3_bucket`, `metadata_s3_key` (string, optional): Metadata file for CSV sources
+- `markdown_file_name`, `markdown_s3_bucket`, `markdown_s3_key` (string): Required for Markdown sources
+- `metadata_file_name`, `metadata_s3_bucket`, `metadata_s3_key` (string, required for files): The companion metadata JSON, named `{primary_file_name}.metadata.json`
 
-**Response:**
+CSV files over 900,000 characters are split into parts at staging. A Markdown file, or a single CSV row, over that size is rejected with `400`. A website or file that is already staged returns `409`.
+
+**Response (website):**
 
 ```json
 {
-  "message": "Data source staged",
-  "action": "staged",
+  "message": "Website staged successfully.",
+  "action": "staged_website",
   "type": "website",
   "created_by": "admin@example.com",
-  "staged_data_source_ids": ["uuid"]
+  "staged_data_source_ids": ["uuid"],
+  "pending_ingestion_run_ids": ["uuid"]
 }
 ```
 
@@ -651,36 +714,30 @@ Stage a new data source (website or CSV) for future syncing.
 
 ### Sync Data Sources
 
-Queue all pending data sources and begin ingestion.
+Queue all pending data sources and start the first ingestion phase (files first, then websites). No request body is needed.
 
 **Endpoint:** `POST /admin/data_sources/sync`
-
-**Request Body (optional):**
-
-```json
-{ "created_by": "admin@example.com" }
-```
 
 **Response:**
 
 ```json
 {
-  "message": "Sync started",
-  "action": "sync_started",
-  "sync_session_id": "uuid",
+  "message": "Pending data sources queued and S3 sync started.",
+  "action": "queued_and_started_s3_sync",
+  "sync_session_id": "hex id",
   "queued_count": 3,
-  "s3_queued_count": 1,
-  "website_queued_count": 2
+  "phase_started": "s3",
+  "details": {}
 }
 ```
+
+`phase_started` is `s3` or `website` (with `action` `queued_and_started_website_sync`). If no phase can start, the endpoint returns `409` with `error`, `queued_count`, `s3_result` and `website_result`. See the [Knowledge Base Documentation](./KNOWLEDGE_BASE_DOCUMENTATION.md#sync-sessions) for details.
 
 **Example (cURL):**
 
 ```bash
 curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/data_sources/sync" \
-  -H "Authorization: eyJraWQiOiJ..." \
-  -H "Content-Type: application/json" \
-  -d '{"created_by": "admin@example.com"}'
+  -H "Authorization: eyJraWQiOiJ..."
 ```
 
 ---
@@ -693,7 +750,7 @@ Generate an S3 presigned POST for uploading a single knowledge base file. Upload
 
 **Query Parameters:**
 
-- `file_name` (string, required): Name of the file to upload (max 255 chars)
+- `file_name` (string, required): Name of the file to upload
 - `content_type` (string, optional): MIME type (default: `application/octet-stream`)
 
 **Response:**
@@ -738,7 +795,7 @@ Generate presigned S3 upload URLs for multiple files in a single request. Use th
 **Parameters:**
 
 - `files` (array, required): Up to 200 file descriptors
-  - `file_name` (string, required): File name (max 255 chars)
+  - `file_name` (string, required): File name
   - `content_type` (string, optional): MIME type (default: `application/octet-stream`)
 
 **Response:**
@@ -784,7 +841,6 @@ Stage multiple CSV/Markdown + metadata JSON file pairs in a single request. Desi
 
 ```json
 {
-  "created_by": "admin@example.com",
   "items": [
     {
       "type": "csv",
@@ -801,7 +857,6 @@ Stage multiple CSV/Markdown + metadata JSON file pairs in a single request. Desi
 
 **Parameters:**
 
-- `created_by` (string, required): Admin email
 - `items` (array, required): Up to 100 file pairs
   - `type` (string, required): `csv` or `markdown`
   - `primary_file_name` (string, required): CSV or Markdown file name
@@ -829,7 +884,7 @@ Stage multiple CSV/Markdown + metadata JSON file pairs in a single request. Desi
 curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/data_sources/batch" \
   -H "Authorization: eyJraWQiOiJ..." \
   -H "Content-Type: application/json" \
-  -d '{"created_by": "admin@example.com", "items": [...]}'
+  -d '{"items": [...]}'
 ```
 
 ---
@@ -848,19 +903,22 @@ Retrieve the latest system configuration settings.
 {
   "id": "uuid",
   "max_messages_per_day": 45,
-  "min_messages_before_suggest": 3,
-  "max_chatacters_per_user_message": 2000,
-  "max_chatacters_per_ai_message": 4000,
-  "temperature": 0.7,
+  "min_messages_before_suggest": 4,
+  "max_characters_per_user_message": 2000,
+  "max_characters_per_ai_message": 5000,
+  "temperature": 0.2,
   "top_p": 0.9,
-  "support_score_threshold": 0.5,
-  "scope_alignment_score_threshold": 0.5,
-  "grounded_threshold": 0.8,
+  "support_score_threshold": 0.25,
+  "scope_alignment_score_threshold": 0.25,
+  "grounded_threshold": 0.75,
   "partially_grounded_threshold": 0.5,
-  "updated_by": null,
+  "specialization_list": ["Major in Computer Science", "..."],
+  "updated_by_email": "admin@example.com",
   "updated_at": "2024-01-15T10:30:00.000Z"
 }
 ```
+
+The values shown are the seeded defaults.
 
 **Example (cURL):**
 
@@ -889,18 +947,21 @@ Update one or more system configuration settings (partial update).
 
 **Parameters (all optional):**
 
-- `max_messages_per_day` (integer): Max messages per user per day
-- `min_messages_before_suggest` (integer): Messages before AI suggestions appear
-- `max_chatacters_per_user_message` (integer): Max user message length
-- `max_chatacters_per_ai_message` (integer): Max AI response length
-- `temperature` (number): LLM temperature (0.0–1.0)
-- `top_p` (number): LLM top-p (0.0–1.0)
-- `support_score_threshold` (number): Threshold for support scoring
-- `scope_alignment_score_threshold` (number): Threshold for scope alignment
-- `grounded_threshold` (number): Threshold for grounded responses
-- `partially_grounded_threshold` (number): Threshold for partially grounded responses
+- `max_messages_per_day` (integer, 1–1000): Max messages per user per day
+- `min_messages_before_suggest` (integer, 0–500): Messages before AI suggestions appear
+- `max_characters_per_user_message` (integer, 1–200000): Max user message length
+- `max_characters_per_ai_message` (integer, 1–200000): Max AI response length
+- `temperature` (number, 0.0–2.0): LLM temperature
+- `top_p` (number, 0.0–1.0): LLM top-p
+- `support_score_threshold` (number, 0.0–1.0): Threshold for support scoring
+- `scope_alignment_score_threshold` (number, 0.0–1.0): Threshold for scope alignment
+- `grounded_threshold` (number, 0.0–1.0): Threshold for grounded responses
+- `partially_grounded_threshold` (number, 0.0–1.0): Threshold for partially grounded responses
+- `specialization_list` (array of strings): At most 200 non-empty entries of at most 200 characters, without `<` or `>`
 
-**Response:** `200 OK` with updated settings object
+Out-of-range values return `400`. The changed fields are recorded in the audit log.
+
+**Response:** `200 OK` with updated settings object (including `updated_by`, the admin's user ID)
 
 **Example (cURL):**
 
@@ -923,28 +984,30 @@ Get usage analytics time series and totals.
 
 **Query Parameters:**
 
-- `timeRange` (string, optional): Time range — `7d`, `30d`, `90d`, `6m`, `1y` (default: `90d`)
+- `timeRange` (string, optional): `<N>d`, `<N>m` (30-day months) or `<N>y`, e.g. `7d`, `90d`, `6m`. Capped at 365 days. Without `timeRange`, only all-time `totals` are returned.
 
 **Response:**
 
 ```json
 {
+  "timeSeries": [
+    {
+      "date": "Jan 20",
+      "users": 12,
+      "questions": 45,
+      "chat_sessions": 18
+    }
+  ],
   "totals": {
     "users": 120,
     "chat_sessions": 450,
     "messages": 3200,
     "questions": 1800
-  },
-  "timeSeries": [
-    {
-      "date": "2024-01-20",
-      "users": 12,
-      "questions": 45,
-      "chat_sessions": 18
-    }
-  ]
+  }
 }
 ```
+
+`users` counts distinct users with a chat session; `questions` counts user messages.
 
 **Example (cURL):**
 
@@ -1024,15 +1087,13 @@ Create a new version of a system message and set it as active.
 
 ```json
 {
-  "content": "AI can make mistakes. Always verify important information.",
-  "adminEmail": "admin@example.com"
+  "content": "AI can make mistakes. Always verify important information."
 }
 ```
 
 **Parameters:**
 
-- `content` (string, required): The full message content
-- `adminEmail` (string, required): Email of the admin creating this version
+- `content` (string, required): The full message content, at most the type's `character_limit` (otherwise `400` with `character_limit` and `content_length`)
 
 **Response:** `200 OK` with the newly created version object (is_active: true)
 
@@ -1042,7 +1103,7 @@ Create a new version of a system message and set it as active.
 curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/system-messages/disclaimer" \
   -H "Authorization: eyJraWQiOiJ..." \
   -H "Content-Type: application/json" \
-  -d '{"content": "AI can make mistakes.", "adminEmail": "admin@example.com"}'
+  -d '{"content": "AI can make mistakes."}'
 ```
 
 ---
@@ -1058,11 +1119,7 @@ Set a specific version as the active version for its type.
 - `system_message_type` (string, required): Message type
 - `version_id` (uuid, required): UUID of the version to activate
 
-**Request Body:**
-
-```json
-{ "adminEmail": "admin@example.com" }
-```
+No request body is needed.
 
 **Response:**
 
@@ -1075,13 +1132,13 @@ Set a specific version as the active version for its type.
 }
 ```
 
+If the version is already active, `status` is `already_active` and `previous_active` is `null`.
+
 **Example (cURL):**
 
 ```bash
 curl -X POST "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/system-messages/disclaimer/uuid/activate" \
-  -H "Authorization: eyJraWQiOiJ..." \
-  -H "Content-Type: application/json" \
-  -d '{"adminEmail": "admin@example.com"}'
+  -H "Authorization: eyJraWQiOiJ..."
 ```
 
 ---
@@ -1097,11 +1154,7 @@ Delete a non-active system message version. Active versions cannot be deleted.
 - `system_message_type` (string, required): Message type
 - `version_id` (uuid, required): UUID of the version to delete
 
-**Request Body:**
-
-```json
-{ "adminEmail": "admin@example.com" }
-```
+No request body is needed. Deleting the active version returns `400`.
 
 **Response:**
 
@@ -1116,9 +1169,7 @@ Delete a non-active system message version. Active versions cannot be deleted.
 
 ```bash
 curl -X DELETE "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/system-messages/disclaimer/uuid" \
-  -H "Authorization: eyJraWQiOiJ..." \
-  -H "Content-Type: application/json" \
-  -d '{"adminEmail": "admin@example.com"}'
+  -H "Authorization: eyJraWQiOiJ..."
 ```
 
 ---
@@ -1128,22 +1179,29 @@ curl -X DELETE "https://{api-id}.execute-api.{region}.amazonaws.com/prod/admin/s
 ### Token Management
 
 - Cognito ID tokens expire after 1 hour — use refresh tokens to obtain new ones
+- Student tokens expire after 15 minutes; request a new one from `/user/publicToken`
 - Never expose tokens in logs or client-side code
 - Use AWS Amplify for automatic secure token storage and refresh
 
 ### CORS
 
-All endpoints support CORS with the following headers:
+Responses carry `Access-Control-Allow-Origin` only when the request's `Origin` is in the `/<STACK-PREFIX>-Api/API/AllowedOrigins` SSM parameter (set to the Amplify URL on deployment). The other headers are:
 
-- `Access-Control-Allow-Origin: *`
-- `Access-Control-Allow-Methods: *`
+- `Access-Control-Allow-Methods: OPTIONS,GET,PUT,POST,DELETE`
 - `Access-Control-Allow-Headers: Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token`
 
 ### Input Validation
 
-- Request bodies are validated against schemas defined in the OpenAPI spec
-- Query parameters are type-checked
+- API Gateway validates required request parameters (the default `params-only` validator); request bodies are not schema-validated by the gateway
+- Handlers validate path IDs (UUID format), string lengths, enums and numeric ranges before using them
+- All database access uses parameterized queries
 - The raw OpenAPI/Swagger definition is located at `cdk/OpenAPI_Swagger_Definition.yaml`
+
+### Rate Limits
+
+- WAF (per IP, per 5 minutes): 2,000 requests overall, 1,000 to `/chat_sessions*`, 20 `POST /user`, 100 `/user/publicToken`
+- API Gateway stage throttle: 100 requests per second (burst 200); `GET /user/publicToken` 50 per second (burst 100)
+- Per user: 10 text generation messages a minute (REST and WebSocket combined), and the daily `max_messages_per_day` quota
 
 ## WebSocket API
 
@@ -1152,17 +1210,41 @@ For real-time streaming AI responses, use the WebSocket API instead of the REST 
 **WebSocket URL:**
 
 ```
-wss://{websocket-api-id}.execute-api.{region}.amazonaws.com/prod
+wss://{websocket-api-id}.execute-api.{region}.amazonaws.com/prod?token={user-token}
 ```
 
-The WebSocket URL is available as a CDK output after deployment.
+The WebSocket URL is available as a CDK output after deployment. The `$connect` authorizer accepts only a student token bound to a user, passed in the `token` query parameter; every message on the connection acts as that user.
+
+**Client messages:**
+
+```json
+{ "action": "generate_text", "chat_session_id": "uuid", "query": "...", "message_id": "uuid" }
+```
+
+```json
+{ "action": "warmup" }
+```
+
+`message_id` is optional and works as in the REST endpoint. `warmup` starts the text generation function ahead of the first message. Each user may send 10 `generate_text` and 2 `warmup` messages a minute, across all connections.
+
+**Server messages:**
+
+| `type` | Fields | Meaning |
+| --- | --- | --- |
+| `start` | | Generation has started |
+| `chunk` | `content` | Next piece of the reply |
+| `complete` | `sources`, `warning`, `chat_session_id`, `token_usage` | Reply finished |
+| `error` | `error`, `message` | `RATE_LIMITED`, `MESSAGE_NOT_SENT`, `DUPLICATE_MESSAGE`, `TOKEN_LIMIT_EXCEEDED` or `GENERATION_FAILED` |
 
 ## Troubleshooting
 
 ### 401 Unauthorized
 
-- Verify the `Authorization` header is present and contains a valid Cognito ID token
-- Check the token hasn't expired (1 hour lifetime)
+- Verify the `Authorization` header is present: `Bearer {student-token}` for user-tier endpoints, the Cognito ID token for `/admin/*`
+- Check the token hasn't expired (15 minutes for student tokens, 1 hour for Cognito ID tokens)
+- User-tier endpoints other than `POST /user` return `401` for an anonymous token; get a token with the `UserKey` header
+
+For administrators, refresh the Cognito session:
 
 ```javascript
 import { fetchAuthSession } from "aws-amplify/auth";
@@ -1172,8 +1254,9 @@ const token = session.tokens?.idToken?.toString();
 
 ### 403 Forbidden
 
-- Verify the user has the required role (`admin` for `/admin/*` endpoints)
-- Admin and user authorizers are separate — having an admin account does not automatically grant user-level access if the user record doesn't exist
+- Verify the user is in the Cognito `admin` group for `/admin/*` endpoints, and has signed in through `/admin/login` so `POST /admin/promote_user` has recorded the `admin` role
+- For user-tier endpoints, check that the `user_id` or chat session belongs to the user in the token
+- WAF rate rules also return `403` when an IP exceeds its limit
 
 ### 404 Not Found
 
@@ -1182,7 +1265,7 @@ const token = session.tokens?.idToken?.toString();
 
 ### 409 Conflict
 
-- A resource with the same identifier already exists (e.g. duplicate email on user creation)
+- A resource with the same identifier already exists (e.g. a data source that is already staged, or a repeated `message_id`)
 
 ### 500 Internal Server Error
 

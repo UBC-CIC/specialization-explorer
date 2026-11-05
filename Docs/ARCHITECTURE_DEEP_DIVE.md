@@ -4,9 +4,9 @@
 
 ![Architecture Diagram](./media/architecture-diagram.png)
 
-1. The user request is first sent through a security layer which comprises of AWS WAF, Amazon CloudFront, and AWS Shield for flagging any potential threats.
+1. The frontend is served by Amplify Hosting through Amazon CloudFront, which AWS Shield Standard protects automatically. Requests to the REST API pass through AWS WAF (managed rule sets and per-IP rate limits). WAF cannot be attached to the WebSocket API, so its messages are rate limited per user in the default route handler.
 
-2. Users access the application through a React frontend hosted on AWS Amplify. AWS Cognito handles user authentication for admins, ensuring that only authorized administrators are able to access admin analytics and features. As for public users, there is no authentication in order to retain anonymity.
+2. Users access the application through a React frontend hosted on AWS Amplify. AWS Cognito handles user authentication for admins (with required TOTP MFA), ensuring that only authorized administrators are able to access admin analytics and features. Students do not sign in, so they stay anonymous: the browser keeps a random user ID and user key and exchanges them for a 15-minute token bound to that user.
 
 3. The frontend communicates with backend services via REST API (API Gateway → Lambda) for CRUD operations. Access is controlled using IAM roles and policies to ensure secure access to the services required to retain functionality. The WebSocket endpoint is used to stream live responses generated from the LLM to the user's frontend.
 
@@ -24,7 +24,7 @@
 
 10. The content within the files and websites are stored as embeddings in Amazon OpenSearch Serverless. The system uses Retrieval-Augmented Generation (RAG) by searching the stored content for the most relevant context before generating a response.
 
-AWS CodePipeline and AWS CodeBuild are used to create the Bedrock Knowledge Base and OpenSearch Serverless collection.
+The Bedrock Knowledge Base, its data sources and the OpenSearch Serverless collection are created by the KnowledgeBase CDK stack through custom resources. AWS CodePipeline and AWS CodeBuild build the container image for the vector index manager Lambda, which creates the vector index in the collection, and push it to Amazon ECR after a vulnerability scan.
 
 ### Why Amazon Bedrock Knowledge Bases?
 
@@ -55,7 +55,11 @@ Bedrock Knowledge Bases handles the full RAG pipeline out of the box — ingesti
 | `last_seen_at`              | Timestamp of the user's last activity                      |
 | `messages_sent`             | Total number of messages sent by the user                  |
 | `messages_window_started_at`| Timestamp marking the start of the current message window  |
-| `metadata`                  | JSONB metadata for additional user information             |
+| `metadata`                  | JSONB metadata, e.g. `contact_email` given by an anonymous user |
+| `user_key_hash`             | SHA-256 hash of the anonymous user's key; clearing it revokes the key |
+| `user_key_version`          | Incremented each time the user key is rotated              |
+
+`email` is set only for administrators, from their verified Cognito address.
 
 #### `data_sources` table
 
@@ -63,7 +67,7 @@ Bedrock Knowledge Bases handles the full RAG pipeline out of the box — ingesti
 | ------------------ | -------------------------------------------------------- |
 | `id`               | UUID, primary key                                        |
 | `name`             | Name of the data source                                  |
-| `type`             | Data source type (`website`, `csv`, `json`)              |
+| `type`             | Data source type (`website`, `csv`, `markdown`, `json`)  |
 | `include_patterns` | List of patterns to include during ingestion             |
 | `exclude_patterns` | List of patterns to exclude during ingestion             |
 | `created_by`       | Foreign key to users table                               |
@@ -76,7 +80,7 @@ Bedrock Knowledge Bases handles the full RAG pipeline out of the box — ingesti
 | ---------------- | ----------------------------------------------------------- |
 | `id`             | UUID, primary key                                           |
 | `data_source_id` | Foreign key to data_sources table                           |
-| `status`         | Ingestion status (`running`, `failed`, `completed`)         |
+| `status`         | Ingestion status (`pending`, `queued`, `running`, `failed`, `completed`) |
 | `error_message`  | Error message if ingestion fails                            |
 | `created_at`     | Timestamp when the ingestion run was created                |
 | `completed_at`   | Timestamp when the ingestion run completed                  |
@@ -107,6 +111,8 @@ Bedrock Knowledge Bases handles the full RAG pipeline out of the box — ingesti
 | `warning`         | Warning message attached to the response if applicable   |
 | `created_at`      | Timestamp of message creation                            |
 
+`chat_messages` is append-only: triggers reject `UPDATE`, `DELETE` and `TRUNCATE` (migrations `001` and `004`). Rows are removed only by the `ON DELETE CASCADE` foreign key when their chat session is deleted. Messages are indexed on `(chat_session_id, created_at, id)` (migration `005`).
+
 ### System Configuration Tables
 
 #### `system_messages` table
@@ -128,12 +134,16 @@ Bedrock Knowledge Bases handles the full RAG pipeline out of the box — ingesti
 | Column Name                     | Description                                                        |
 | ------------------------------- | ------------------------------------------------------------------ |
 | `id`                            | UUID, primary key                                                  |
-| `max_messages_per_day`          | Maximum number of messages a user can send per day                 |
-| `min_messages_before_suggest`   | Minimum number of messages before suggestions are shown            |
-| `max_chatacters_per_user_message` | Maximum number of characters allowed in a user message           |
-| `max_chatacters_per_ai_message` | Maximum number of characters allowed in an AI message              |
-| `temperature`                   | Temperature setting used for text generation                       |
-| `top_p`                         | Top-p setting used for text generation                             |
+| `max_messages_per_day`          | Maximum number of messages a user can send per day (default 45)    |
+| `min_messages_before_suggest`   | Minimum number of messages before suggestions are shown (default 4) |
+| `max_characters_per_user_message` | Maximum number of characters allowed in a user message (default 2000) |
+| `max_characters_per_ai_message` | Maximum number of characters allowed in an AI message (default 5000) |
+| `temperature`                   | Temperature setting used for text generation (default 0.2)         |
+| `top_p`                         | Top-p setting used for text generation (default 0.9)               |
+| `support_score_threshold`       | Minimum support score for a response's claims (default 0.25)       |
+| `scope_alignment_score_threshold` | Minimum relevance of the retrieved sources (default 0.25)        |
+| `grounded_threshold`            | Score above which a response is fully grounded (default 0.75)      |
+| `partially_grounded_threshold`  | Score above which a response is partially grounded (default 0.50)  |
 | `specialization_list`           | List of supported specialization areas                             |
 | `updated_by`                    | Foreign key to users table                                         |
 | `updated_at`                    | Timestamp of last update                                           |
@@ -160,6 +170,7 @@ Defines the type of managed data source:
 
 - `website`
 - `csv`
+- `markdown`
 - `json`
 
 #### `ingestion_status`

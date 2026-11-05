@@ -14,7 +14,7 @@ The Specialization Explorer uses Bedrock foundation models to:
 - Guide students through a structured discovery flow (Detective → Suggestion phases)
 - Provide personalized recommendations via natural language conversation
 
-The primary model used is configurable via environment variables (defaulting to Claude Haiku for fast responses and Claude Sonnet for suggestions), accessed through Amazon Bedrock.
+The models are set by the `/SpecEx/LLM/HaikuArn` and `/SpecEx/LLM/SonnetArn` SSM parameters (Claude Haiku 5.5 and Claude Sonnet 5.5 by default) and accessed through Amazon Bedrock. Haiku answers in the detective phase, rewrites queries and verifies answers; Sonnet answers in the suggestion phase. See the [Modification Guide](./MODIFICATION_GUIDE.md#configuring-llm-models).
 
 ### What are Bedrock Guardrails?
 Bedrock Guardrails are safety controls that check, filter, and moderate model inputs. They help ensure user messages are safe to process before they ever reach the LLM.

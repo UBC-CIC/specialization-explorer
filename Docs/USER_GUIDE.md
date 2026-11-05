@@ -16,7 +16,7 @@ Once you have deployed the solution, the following user guide will help you navi
 
 ## Getting Started
 
-Open the hosted Amplify URL provided during deployment, or run the frontend locally. No account is required — the chat interface is publicly accessible.
+Open the hosted Amplify URL provided during deployment, or run the frontend locally (see `frontend/README.md`). No account is required — the chat interface is publicly accessible. The browser keeps an anonymous ID so a returning student sees their earlier chats; clearing site data starts a new, empty history.
 
 ---
 
@@ -56,15 +56,17 @@ AI responses may include source references. Users can expand these to see the or
 
 ### Chat Sessions
 
-The left sidebar lists all previous chat sessions. Users can start a new chat with the `+` button, switch between sessions, or delete sessions via the actions menu on each session item.
+The left sidebar lists all previous chat sessions. Users can start a new chat with the `+` button and switch between sessions. The actions menu on each session item can rename or delete the session, and for the open session, export the conversation as a `.txt` transcript.
+
+Each student can send a limited number of messages per day (set by administrators) and at most 10 messages a minute. Past either limit, the chat shows a message explaining it.
 
 ---
 
 ## Administrator View
 
-Administrators log in via Cognito and access the admin dashboard from the header. The sidebar provides navigation between four sections: Dashboard, System Settings, Analytics, and Chat History.
+Administrators log in via Cognito with their email, password and a code from an authenticator app (MFA is required), and access the admin dashboard from the header. The sidebar provides navigation between four sections: Dashboard & Management, Analytics, System Settings, and Chat History.
 
-If the administrator has just been given access, they will not have the mode dragdown option on the top right. They will manually have to add `/admin/login` to the end of the URL to login for the first time. After this, they will be able to see the mode dragdown option and will seamlessly be able to switch between the student and administrator view.
+If the administrator has just been given access, they will not have the mode dropdown option on the top right. They will manually have to add `/admin/login` to the end of the URL to login for the first time, and set up the authenticator app at that first sign-in. After this, they will be able to see the mode dropdown option and will seamlessly be able to switch between the student and administrator view.
 
 ![image](./media/admin-log-in.png)
 
@@ -76,19 +78,25 @@ The dashboard shows platform-wide metrics (total users, chat sessions, and messa
 
 #### Adding a Website
 
-Click "Add Web URL" to stage a website for ingestion. Optionally provide include/exclude URL regex patterns to control which pages are crawled.
+Click "Add Web URL" to stage a website for ingestion, then "Stage URL". Optionally provide include/exclude URL regex patterns (one per line) to control which pages are crawled. The URL must start with `http://` or `https://`, and an include pattern that matches every URL (such as `.*`) is rejected.
+
+The website is added as a seed URL to one of the existing web crawlers, which re-crawl all of their seeds on every sync. Each crawler holds at most 100 seed URLs, under 3,000 characters in total. When no crawler has room, the website is marked Failed with that reason; remove websites, use a shorter parent URL, or upload the pages as Markdown files instead.
 
 ![image](./media/admin-add-website.png)
 
 #### Adding a File
 
-Click "Add Alumni Data (CSV or Markdown)" to upload a CSV/Markdown file and its corresponding metadata JSON. Both files are uploaded to S3 and staged for the next sync.
+Click "Add Data (CSV or Markdown)". On the **Single File** tab, choose a CSV or Markdown file and its metadata JSON, which must be named `<file name>.metadata.json` (for example `alumni.csv.metadata.json`). Each file must be under 50 MB. Both files are uploaded to S3 and staged for the next sync.
+
+On the **Zip Upload** tab, drop a `.zip` that contains several CSV/Markdown files, each with its matching `.metadata.json` file. Every matched pair is uploaded and staged; pairs that are already staged are skipped.
+
+Large CSV files are split into parts automatically. A Markdown file over about 900,000 characters is rejected and must be split before uploading.
 
 ![image](./media/admin-add-file.png)
 
 #### Syncing Data Sources
 
-Once data sources are staged, click "Sync" to kick off an ingestion job. The table shows each source's type, name, and latest ingestion run status (Pending, Queued, Running, Completed, or Failed).
+Once data sources are staged, click "Sync" to kick off an ingestion job. Sync is enabled only while a source is Pending or Queued. Files are ingested first, then websites in batches; statuses are checked every 5 minutes for files and every 10 minutes for websites. The table shows each source's name, type, latest ingestion run status (Pending, Queued, Running, Completed, Completed with errors, Failed, or No runs) and upload and completion times. Metadata JSON files appear as expandable rows under their CSV or Markdown file.
 
 
 ### Analytics
@@ -109,7 +117,7 @@ Admins can configure:
 - Max messages per day per user — daily cap on how many messages a student can send before being rate-limited.
 - Min exchanges before suggestion phase activates — how many back-and-forth turns must happen before the AI is allowed to recommend specializations.
 - Max characters per user and AI message — caps the length of both student inputs and AI responses.
-- Temperature — controls how "creative" the AI sounds (0.0–1.0). Lower values produce more consistent, predictable answers; higher values produce more varied responses.
+- Temperature — controls how "creative" the AI sounds (0.0–2.0, default 0.2). Lower values produce more consistent, predictable answers; higher values produce more varied responses.
 - Top-p — works alongside temperature to fine-tune response variety (0.0–1.0). In most cases the default value works well and doesn't need to be changed.
 - Support score threshold — minimum score (0.0–1.0) for the AI's claims to be considered backed by the retrieved sources. Responses falling below this are immediately flagged as unsupported.
 - Scope alignment score threshold — minimum score (0.0–1.0) for the retrieved sources to be considered relevant to the user's question. Falling below this also forces an unsupported label.
@@ -153,7 +161,7 @@ The "How the Prompt Is Built" card shows a visual breakdown of how the active me
 
 ### Chat History
 
-The Chat History page lets admins review all user conversations. Expand a user row to see their sessions, then click a session to view the full message transcript on the right, including any sources the AI cited.
+The Chat History page lets admins review user conversations (the 100 most recently active users). Users and their chats are numbered by creation order. Expand a user row to see their sessions, then click a session to view the full message transcript on the right, including any sources the AI cited.
 
 ![image](./media/admin-chat-history.png)
 

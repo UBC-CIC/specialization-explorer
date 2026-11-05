@@ -109,14 +109,17 @@ The Knowledge Base ingestion workflow is split across several helper modules.
 
 | File                                                               | Responsibility                                                                                   |
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| `cdk/lambda/lambdaKnowledgeBase/main.py`                           | Main Lambda entry point. Routes API Gateway requests and scheduler events.                       |
-| `cdk/lambda/lambdaKnowledgeBase/helpers/cors.py`                   | Builds CORS response headers from the configured allowed origins.                                |
-| `cdk/lambda/lambdaKnowledgeBase/helpers/generate_presigned_url.py` | Creates short-lived S3 POST policies for admin uploads.                                            |
-| `cdk/lambda/lambdaKnowledgeBase/helpers/stage_data_sources.py`     | Validates and stages websites, CSV/JSON pairs, and Markdown/JSON pairs.                          |
-| `cdk/lambda/lambdaKnowledgeBase/helpers/start_ingestion_job.py`    | Starts a sync session by promoting pending runs to queued and starting the first eligible phase. |
-| `cdk/lambda/lambdaKnowledgeBase/helpers/process_s3_batch.py`       | Starts the S3 ingestion phase for queued CSV, Markdown, and JSON sources.                        |
-| `cdk/lambda/lambdaKnowledgeBase/helpers/process_website_batch.py`  | Starts website ingestion batches using Bedrock web crawler data sources.                         |
-| `cdk/lambda/lambdaKnowledgeBase/helpers/update_status.py`          | Polls Bedrock ingestion jobs, updates run status, deletes schedules, and advances the workflow.  |
+| `cdk/lambda/knowledgeBase/main.py`                           | Main Lambda entry point. Routes API Gateway requests and scheduler events.                       |
+| `cdk/lambda/knowledgeBase/helpers/cors.py`                   | Builds CORS response headers from the configured allowed origins.                                |
+| `cdk/lambda/knowledgeBase/helpers/generate_presigned_url.py` | Creates short-lived S3 POST policies for admin uploads.                                            |
+| `cdk/lambda/knowledgeBase/helpers/generate_presigned_urls_batch.py` | Creates S3 POST policies for up to 200 files in one request (zip uploads).                |
+| `cdk/lambda/knowledgeBase/helpers/stage_data_sources.py`     | Validates and stages websites, CSV/JSON pairs, and Markdown/JSON pairs.                          |
+| `cdk/lambda/knowledgeBase/helpers/stage_data_sources_batch.py` | Stages up to 100 CSV/Markdown + metadata JSON pairs in one request; skips duplicates.          |
+| `cdk/lambda/knowledgeBase/helpers/audit.py`                  | Writes structured audit records for admin requests and scheduler-driven changes.                 |
+| `cdk/lambda/knowledgeBase/helpers/start_ingestion_job.py`    | Starts a sync session by promoting pending runs to queued and starting the first eligible phase. |
+| `cdk/lambda/knowledgeBase/helpers/process_s3_batch.py`       | Starts the S3 ingestion phase for queued CSV, Markdown, and JSON sources.                        |
+| `cdk/lambda/knowledgeBase/helpers/process_website_batch.py`  | Starts website ingestion batches using Bedrock web crawler data sources.                         |
+| `cdk/lambda/knowledgeBase/helpers/update_status.py`          | Polls Bedrock ingestion jobs, updates run status, deletes schedules, and advances the workflow.  |
 
 ## Request Entry Points
 
@@ -129,11 +132,17 @@ The Lambda handles two types of events:
 
 The Lambda handles the following admin routes:
 
-| Method | Route                           | Handler                  | Purpose                                                               |
-| ------ | ------------------------------- | ------------------------ | --------------------------------------------------------------------- |
-| `GET`  | `/admin/generate-presigned-url` | `generate_presigned_url` | Create a presigned S3 POST for an admin file upload.                 |
-| `POST` | `/admin/data_sources`           | `stage_data_sources`     | Stage a website, CSV/JSON pair, or Markdown/JSON pair.                |
-| `POST` | `/admin/data_sources/sync`      | `start_ingestion_job`    | Promote pending sources to queued and start the next ingestion phase. |
+| Method | Route                                  | Handler                         | Purpose                                                               |
+| ------ | -------------------------------------- | ------------------------------- | --------------------------------------------------------------------- |
+| `GET`  | `/admin/generate-presigned-url`        | `generate_presigned_url`        | Create a presigned S3 POST for an admin file upload.                  |
+| `POST` | `/admin/generate-presigned-urls/batch` | `generate_presigned_urls_batch` | Create presigned S3 POSTs for up to 200 files.                        |
+| `POST` | `/admin/data_sources`                  | `stage_data_sources`            | Stage a website, CSV/JSON pair, or Markdown/JSON pair.                |
+| `POST` | `/admin/data_sources/batch`            | `stage_data_sources_batch`      | Stage up to 100 CSV/Markdown + metadata JSON pairs.                   |
+| `POST` | `/admin/data_sources/sync`             | `start_ingestion_job`           | Promote pending sources to queued and start the next ingestion phase. |
+
+`GET /admin/data_sources`, which the dashboard uses to list sources, is served by the admin handler (`cdk/lambda/handlers/adminHandler.js`), not by this Lambda.
+
+Every API request must come through the admin authorizer (`role` is `admin` in the authorizer context). The acting administrator is taken from the verified e-mail in the Cognito token and must exist in `users` with the `admin` role; otherwise the Lambda returns `403`. Request bodies are never used to identify the administrator. Each API request is written to the audit log.
 
 ### Scheduler events
 
@@ -196,7 +205,8 @@ This means the dashboard is a latest-status view, not a full ingestion history v
 | UI Action                   | Backend Route                                                                  | Result                                                                                   |
 | --------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | Add Web URL                 | `POST /admin/data_sources`                                                     | Stages a website as `pending`.                                                           |
-| Add Data (CSV or Markdown)  | `GET /admin/generate-presigned-url`, S3 `POST`, then `POST /admin/data_sources` | Uploads the primary file and metadata JSON, then stages both as `pending`.               |
+| Add Data (CSV or Markdown), Single File tab | `GET /admin/generate-presigned-url`, S3 `POST`, then `POST /admin/data_sources` | Uploads the primary file and metadata JSON, then stages both as `pending`.               |
+| Add Data (CSV or Markdown), Zip Upload tab  | `POST /admin/generate-presigned-urls/batch`, S3 `POST` per file, then `POST /admin/data_sources/batch` | Uploads every matched pair in the zip, then stages them as `pending`.        |
 | Sync                        | `POST /admin/data_sources/sync`                                                | Promotes latest `pending` runs to `queued` and starts the next eligible ingestion phase. |
 | Refresh table after actions | `GET /admin/data_sources`                                                      | Reloads the data source table and latest run statuses.                                   |
 
@@ -281,7 +291,7 @@ The generated S3 key uses this format:
 {prefix}/{timestamp}_{file_name}
 ```
 
-The presigned URL expires after 300 seconds. The admin UI uploads the file directly to S3 using HTTP `PUT`.
+The response is a presigned POST (`presignedUrl` plus form `fields`). The single-file policy expires after 300 seconds and the batch policies after 600 seconds. The admin UI uploads each file directly to S3 with a `multipart/form-data` `POST`. The signed policy fixes the `Content-Type` and limits the object to 50 MB, so S3 rejects larger uploads.
 
 Important: generating the presigned URL does not create any database records, and objects under `quarantine/` are never read by Bedrock. The file must still be staged through `POST /admin/data_sources` (or the batch route) after upload. Staging checks that the key is a quarantine key in the knowledge base bucket, then copies the file to the same path under `uploads/` (for example `quarantine/csv/1712345678_data.csv` becomes `uploads/csv/1712345678_data.csv`) and records that key. The Bedrock data source is limited to the `uploads/` prefix, so only staged files enter the corpus. Uploads that are never staged are deleted from `quarantine/` after 7 days.
 
@@ -310,19 +320,16 @@ For a website source, the request must include:
 | Field              | Description                              |
 | ------------------ | ---------------------------------------- |
 | `type`             | Must be `website`                        |
-| `created_by`       | Admin email address                      |
 | `name`             | Website URL                              |
 | `include_patterns` | Optional list of crawler include filters |
 | `exclude_patterns` | Optional list of crawler exclude filters |
 
 The function validates that:
 
-* `created_by` is present
-* the admin exists in the `users` table
-* `name` is present
-* `include_patterns`, if provided, is a list
-* `exclude_patterns`, if provided, is a list
-* the same website URL does not already exist in `data_sources`
+* `name` is present and is an `http` or `https` URL with a host, at most 2,048 characters
+* `include_patterns` and `exclude_patterns`, if provided, are lists of at most 20 strings, each at most 500 characters and a valid regular expression
+* no include pattern matches every URL (for example `.*` or `^.+$`), since it would widen the crawl of every seed on the shared crawler
+* the same website URL does not already exist in `data_sources` (otherwise `409`)
 
 If validation passes, it inserts:
 
@@ -340,7 +347,6 @@ For CSV, the request must include:
 | Field                | Description                            |
 | -------------------- | -------------------------------------- |
 | `type`               | Must be `csv`                          |
-| `created_by`         | Admin email address                    |
 | `csv_file_name`      | Uploaded CSV file name                 |
 | `csv_s3_bucket`      | S3 bucket containing the CSV           |
 | `csv_s3_key`         | S3 key for the CSV                     |
@@ -372,12 +378,12 @@ Examples:
 
 The function validates that:
 
-* the admin exists
 * all primary file details are present
 * all metadata JSON details are present
 * the primary file extension matches the source type
 * the metadata file ends with `.json`
 * the metadata file name matches the required naming convention
+* both objects are in the knowledge base bucket, under the `quarantine/` folder for their kind (`quarantine/csv/`, `quarantine/markdown/` or `quarantine/json/`), and the stored name less its upload timestamp is the declared file name
 * both uploaded objects exist in S3 using `head_object`
 * neither S3 object has already been staged
 
@@ -396,7 +402,7 @@ A sync session starts when an admin calls:
 POST /admin/data_sources/sync
 ```
 
-The request must include the admin email in `created_by`.
+The request needs no body; the administrator comes from the token.
 
 The sync handler creates a new `sync_session_id` using `uuid4().hex`. This ID is written into the metadata of all newly queued runs so the system can track work that belongs to the same admin sync action.
 
@@ -420,11 +426,11 @@ After promotion, the run metadata contains:
 }
 ```
 
-If no pending runs are found, the endpoint returns `409` with:
+If no pending runs are found, the handler still continues: runs left `queued` by an earlier sync whose batch could not start (for example after a Bedrock error) are retried. If nothing is pending or queued, the endpoint returns `409` with:
 
 ```json
 {
-  "error": "No pending data sources found to queue."
+  "error": "No pending or queued data sources found to sync."
 }
 ```
 
@@ -451,7 +457,7 @@ If no S3 work is eligible, the handler calls:
 process_website_batch(...)
 ```
 
-If neither phase can start, the endpoint returns `409` with diagnostic details from both attempted phases.
+If neither phase can start, the endpoint returns `409` with diagnostic details from both attempted phases (`s3_result` and `website_result`). When websites were marked `failed` because no crawler has room for them, the error is that message.
 
 ## State Machine Logic
 
@@ -669,6 +675,8 @@ After updating the crawler, the helper starts a Bedrock ingestion job for that c
 
 ### Creating a new crawler
 
+> This path is disabled: `NEW_WEB_CRAWLERS_SUPPORTED` is `False` (see above), so no crawler is created and the existing crawlers are the only capacity. The description below applies only if the flag is turned back on.
+
 If no available crawler exists, the helper may create a new web crawler data source.
 
 A new crawler can only be created if the current number of web crawlers is less than `MAX_WEB_DATA_SOURCES`.
@@ -848,10 +856,11 @@ The Lambda returns structured JSON errors for common request failures.
 | Missing `file_name` for presigned URL | `400`    |
 | Unsupported upload content type       | `400`    |
 | Invalid JSON request body             | `400`    |
-| Missing `created_by`                  | `400`    |
-| Admin email not found                 | `400`    |
+| Invalid website URL or crawler patterns | `400`  |
+| Upload key outside `quarantine/` or not matching the file name | `400` |
+| Caller is not an admin, or not in `users` with the `admin` role | `403` |
 | Duplicate website or file source      | `409`    |
-| No pending sources to queue           | `409`    |
+| No pending or queued sources to sync  | `409`    |
 | No eligible batch can start           | `409`    |
 | Database connection failure           | `500`    |
 | Knowledge Base ID lookup failure      | `500`    |
@@ -956,6 +965,9 @@ The Lambda depends on several environment variables.
 | `ALLOWED_ORIGIN_PARAM`       | Optional SSM parameter containing allowed CORS origins.          |
 | `SCHEDULER_ROLE_ARN`         | IAM role used by EventBridge Scheduler to invoke the Lambda.     |
 | `SCHEDULER_TARGET_ARN`       | Lambda ARN invoked by EventBridge Scheduler.                     |
+| `METRICS_NAMESPACE`          | CloudWatch namespace for the ingestion failure metrics (`<StackPrefix>-Api/KnowledgeBase`). |
+
+Schedules are created in the `default` schedule group with names starting with `kb-`; the Lambda's IAM policy and the scheduler role's trust policy are scoped to that group.
 
 ## Design Notes
 
@@ -990,14 +1002,15 @@ Retries create new `ingestion_runs` rows instead of mutating failed rows back to
 
 ## References
 
-* Main Lambda router: `cdk/lambda/lambdaKnowledgeBase/main.py`
-* CORS helper: `cdk/lambda/lambdaKnowledgeBase/helpers/cors.py`
-* Presigned upload helper: `cdk/lambda/lambdaKnowledgeBase/helpers/generate_presigned_url.py`
-* Staging helper: `cdk/lambda/lambdaKnowledgeBase/helpers/stage_data_sources.py`
-* Sync session helper: `cdk/lambda/lambdaKnowledgeBase/helpers/start_ingestion_job.py`
-* S3 batch helper: `cdk/lambda/lambdaKnowledgeBase/helpers/process_s3_batch.py`
-* Website batch helper: `cdk/lambda/lambdaKnowledgeBase/helpers/process_website_batch.py`
-* Polling and retry helper: `cdk/lambda/lambdaKnowledgeBase/helpers/update_status.py`
+* Main Lambda router: `cdk/lambda/knowledgeBase/main.py`
+* CORS helper: `cdk/lambda/knowledgeBase/helpers/cors.py`
+* Presigned upload helpers: `cdk/lambda/knowledgeBase/helpers/generate_presigned_url.py`, `cdk/lambda/knowledgeBase/helpers/generate_presigned_urls_batch.py`
+* Staging helpers: `cdk/lambda/knowledgeBase/helpers/stage_data_sources.py`, `cdk/lambda/knowledgeBase/helpers/stage_data_sources_batch.py`
+* Knowledge base and data source provisioning: `cdk/lib/knowledge-base-stack.ts` (`WEB_DATA_SOURCES`) and `cdk/lambda/knowledgeBaseProvisioner/main.py`
+* Sync session helper: `cdk/lambda/knowledgeBase/helpers/start_ingestion_job.py`
+* S3 batch helper: `cdk/lambda/knowledgeBase/helpers/process_s3_batch.py`
+* Website batch helper: `cdk/lambda/knowledgeBase/helpers/process_website_batch.py`
+* Polling and retry helper: `cdk/lambda/knowledgeBase/helpers/update_status.py`
 
 ---
 

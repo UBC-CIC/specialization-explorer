@@ -30,10 +30,11 @@ Before you deploy, you must have the following installed on your device:
 - [AWS Account](https://aws.amazon.com/account/)
 - [GitHub Account](https://github.com/)
 - [AWS CLI](https://aws.amazon.com/cli/) _(v2.0.0+ required)_
-- [AWS CDK](https://docs.aws.amazon.com/cdk/v2/guide/cli.html) _(v2.1022.0+ required)_
+- [AWS CDK](https://docs.aws.amazon.com/cdk/v2/guide/cli.html) _(installed by `npm install` in `cdk/`, pinned in `cdk/package.json`; run it with `npx cdk`)_
 - [npm](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm) _(v10.0.0+ required)_
-- [node](https://nodejs.org/en/learn/getting-started/how-to-install-nodejs) _(v22.7.9+ required)_
+- [node](https://nodejs.org/en/learn/getting-started/how-to-install-nodejs) _(v22+ required; v24 LTS, the runtime the Node.js Lambda functions use, is recommended)_
 - [Python](https://www.python.org/downloads/) _(v3.12+ required)_
+- [Docker](https://docs.docker.com/get-docker/) _(only needed to re-lock Python dependencies, see [Dependency Management](./DEPENDENCY_MANAGEMENT.MD))_
 
 ### Request Higher Bedrock LLM Invocation Quotas
 
@@ -498,13 +499,12 @@ npx cdk bootstrap \
 
 You may run the following command to deploy the stacks all at once. Again, replace `<YOUR-PROFILE-NAME>` with the appropriate AWS profile used earlier. Also replace `<YOUR-STACK-PREFIX>` with the appropriate stack prefix.
 
-The stack prefix will be prefixed onto the physical names of the resources created during deployment. The `environment` parameter specifies the deployment environment (dev, test, prod), the `version` parameter indicates the application version being deployed, and the `githubRepo` parameter should match your forked repository name.
+The stack prefix will be prefixed onto the physical names of the resources created during deployment. The `environment` parameter specifies the deployment environment (dev, test, prod) and is applied as a tag; in `dev` the VPC flow logs keep 90 days. The `githubRepo` parameter should match your forked repository name. The optional `githubBranch` parameter (default `main`) selects the branch CodePipeline builds from and adds that branch to the Amplify app.
 
 ```bash
 npx cdk deploy --all \
   --context StackPrefix=<YOUR-STACK-PREFIX> \
   --context environment=dev \
-  --context version=1.0.0 \
   --context githubRepo=specialization-explorer \
   --profile <YOUR-PROFILE-NAME>
 ```
@@ -515,7 +515,6 @@ For example:
 npx cdk deploy --all \
   --context StackPrefix=<YOUR-STACK-PREFIX> \
   --context environment=dev \
-  --context version=1.0.0 \
   --context githubRepo=specialization-explorer \
   --profile my-aws-profile
 ```
@@ -533,8 +532,9 @@ The CDK deployment creates the following stacks in dependency order:
 | `<PREFIX>-DBFlow` | Database migration Lambda and schema setup |
 | `<PREFIX>-CICD` | CodePipeline and ECR repositories for Docker image builds |
 | `<PREFIX>-KnowledgeBase` | Amazon Bedrock Knowledge Base, OpenSearch Serverless collection, and S3 data source bucket |
-| `<PREFIX>-Api` | API Gateway (REST + WebSocket), all Lambda functions, and Cognito User Pool |
+| `<PREFIX>-Api` | API Gateway (REST + WebSocket), WAF, Bedrock guardrail, the application Lambda functions, and Cognito User Pool |
 | `<PREFIX>-Amplify` | AWS Amplify app connected to your GitHub repository |
+| `<PREFIX>-Backup` | AWS Backup vault and daily plan (35-day retention) for the database and the knowledge base bucket |
 
 ### Authorize the GitHub Connection (Required After First Deploy)
 
@@ -603,7 +603,7 @@ This means in most cases you do not need to manually trigger the pipeline — it
 
 1. Log in to AWS console, and navigate to **AWS Amplify**. You can do so by typing `Amplify` in the search bar at the top.
 2. From `All apps`, click `<STACK-PREFIX>-amplify`.
-3. You will see multiple branches listed (`main`, `dev`, `api_endpoint_setup`). Click on the branch that corresponds to your GitHub repository's default branch (typically `main`).
+3. You will see the `main` branch, plus the branch you passed as `githubBranch` if it is not `main`. Click the branch you deployed (`main` by default). The API and S3 CORS settings allow only `https://<githubBranch>.<app-id>.amplifyapp.com`, so use that branch's URL.
 4. Click `Redeploy this version` to trigger a build
 5. Wait for the build to complete (this may take 5-10 minutes)
 6. You now have access to the `Amplify App ID` and the public domain name to use the web app.
@@ -623,7 +623,7 @@ This means in most cases you do not need to manually trigger the pipeline — it
 To create an admin user for accessing the admin dashboard:
 
 1. Navigate to **AWS Cognito** in the AWS Console
-2. Find the User Pool named `<STACK-PREFIX>-UserPool`
+2. Find the User Pool named `<STACK-PREFIX>-Api-UserPool`
 3. Click on "Users" in the left sidebar
 4. Click "Create user"
 5. Fill in the required information:
@@ -634,7 +634,7 @@ To create an admin user for accessing the admin dashboard:
 7. Click "Create user"
 8. After creation, select the user and click "Add user to group"
 9. Select the "admin" group
-10. Open the web app and add `/admin/login` to the end of the URL, then sign in with the email and temporary password. You'll be prompted to set a new password on first login.
+10. Open the web app and add `/admin/login` to the end of the URL, then sign in with the email and temporary password. You'll be prompted to set a new password on first login. After sign-in the app calls `POST /admin/promote_user`, which records the account in the database with the `admin` role.
 11. Set up an authenticator app (for example Microsoft Authenticator, Google Authenticator or 1Password). The login page shows a setup key, and a link that opens the app on a phone. Enter the 6-digit code from the app to finish signing in.
 
 MFA is required: every later sign-in asks for a code from the authenticator app. If an administrator loses their authenticator app, an AWS administrator can reset it by running `aws cognito-idp admin-set-user-mfa-preference --user-pool-id <POOL-ID> --username <EMAIL> --software-token-mfa-settings Enabled=false,PreferredMfa=false`; the administrator then enrolls a new app at their next sign-in.
@@ -647,21 +647,28 @@ After the first sign-in, the mode dropdown appears in the top right of the heade
 
 You can now navigate to the web app URL (found in the Amplify console) to see your application in action.
 
-**Default URL format:** `https://main.<app-id>.amplifyapp.com`
+**Default URL format:** `https://main.<app-id>.amplifyapp.com` (or `https://<githubBranch>.<app-id>.amplifyapp.com` if you deployed another branch)
 
 ### Step 4: Add Data to the Knowledge Base
 
-A freshly deployed knowledge base is empty, so the chatbot has nothing to answer from until an administrator adds data. Sign in as an administrator and use the dashboard to add data sources, then sync them:
+A freshly deployed knowledge base contains no content, so the chatbot has nothing to answer from until data is ingested.
 
-- [Adding a Website](./USER_GUIDE.md#adding-a-website): stage a website for crawling, with optional include/exclude URL patterns.
-- [Adding a File](./USER_GUIDE.md#adding-a-file): upload a CSV/Markdown file and its metadata JSON.
+The deployment does set up 8 default UBC Science websites. They are the starting URLs of two web crawler data sources, `department-webpages` and `science-programs`, defined in `WEB_DATA_SOURCES` in `cdk/lib/knowledge-base-stack.ts`. These websites are not crawled during deployment, and they are not listed on the admin dashboard, which shows only sources that administrators add. Clicking **Sync** with nothing staged does not crawl them either; it reports that there is nothing to sync. The default websites are crawled when either of these happens:
+
+- An administrator stages a website and clicks **Sync**. Each website sync re-crawls every starting URL on its crawler, so the defaults on that crawler are ingested as well.
+- Someone starts a sync on the `department-webpages` and `science-programs` data sources in the Amazon Bedrock console (**Knowledge Bases** → `<STACK-PREFIX>-KnowledgeBase` → **Data sources**). This crawls the defaults without adding anything to the dashboard.
+
+To add your own content, sign in as an administrator and use the dashboard to add data sources, then sync them:
+
+- [Adding a Website](./USER_GUIDE.md#adding-a-website): stage a website for crawling, with optional include/exclude URL patterns. Websites are added to the existing web crawlers; Bedrock no longer allows new Web Crawler data sources to be created.
+- [Adding a File](./USER_GUIDE.md#adding-a-file): upload a CSV/Markdown file and its metadata JSON, or a zip of such pairs.
 - [Syncing Data Sources](./USER_GUIDE.md#syncing-data-sources): start an ingestion job so staged sources become searchable.
 
 See the [Knowledge Base Documentation](./KNOWLEDGE_BASE_DOCUMENTATION.md) for how ingestion works under the hood.
 
 ### Adding Custom Allowed Origins
 
-The application stores allowed CORS origins in an SSM parameter (`/<STACK-PREFIX>-Api/API/AllowedOrigins`). The Amplify URL is added automatically during deployment. If you need to allow additional origins (e.g., a custom domain or localhost for development), update the parameter manually:
+The application stores allowed CORS origins in an SSM parameter (`/<STACK-PREFIX>-Api/API/AllowedOrigins`). Every deployment of the Amplify stack overwrites this parameter with the Amplify URL alone. If you need to allow additional origins (e.g., a custom domain or localhost for development), update the parameter manually after each Amplify stack deployment:
 
 <details>
 <summary>macOS/Linux</summary>
@@ -707,7 +714,7 @@ aws ssm put-parameter `
 
 &nbsp;
 
-_Note: Always read the current value first and append your new origin to avoid removing existing ones. Origins should not have trailing slashes. Subsequent CDK deployments will not duplicate existing origins._
+_Note: Always read the current value first and append your new origin to avoid removing existing ones. Origins should not have trailing slashes. The Lambda functions cache the list, so a change reaches warm functions only after they restart. A deployment of the Amplify stack resets the parameter to the Amplify URL, so re-add custom origins afterwards. The Amplify stack also sets the API stage variable `allowedOrigin` (used by preflight and gateway error responses) and the knowledge base bucket CORS rule to the Amplify URL only; a custom domain that uploads files or relies on those responses needs them updated as well._
 
 ## Troubleshooting
 
@@ -756,8 +763,8 @@ _Note: Always read the current value first and append your new origin to avoid r
 - Solution:
   - Verify the `<PREFIX>-KnowledgeBase` stack deployed successfully in CloudFormation.
   - Check that the S3 bucket for the knowledge base exists and contains your source documents.
-  - The web crawler data source is created with a `.*` exclusion filter by default — nothing is crawled until you add real URLs via the admin dashboard.
-  - Trigger a manual ingestion job from the Bedrock console under Knowledge Bases.
+  - Nothing is ingested until a sync runs. **Sync** on the admin dashboard ingests staged sources only; the default UBC websites are crawled only alongside a staged website, or by syncing the `department-webpages` and `science-programs` data sources in the Bedrock console (see [Step 4](#step-4-add-data-to-the-knowledge-base)).
+  - Check the status and error shown for each source on the dashboard, and the `KnowledgeBaseFailedDocumentsAlarm` and `KnowledgeBaseFailedIngestionJobsAlarm` CloudWatch alarms. See the [Knowledge Base Documentation](./KNOWLEDGE_BASE_DOCUMENTATION.md) for the ingestion states.
 
 ## Cleanup
 
@@ -768,23 +775,23 @@ To take down the deployed stack for a fresh redeployment in the future, follow t
 1. **Disable RDS Deletion Protection:**
    - Navigate to **Amazon RDS** in the AWS Console
    - Click on "Databases" in the left sidebar
-   - Select the database instance named `<STACK-PREFIX>-database`
+   - Select the database instance created by the `<STACK-PREFIX>-Database` stack (its identifier starts with the lowercase stack name; the stack's **Resources** tab shows it)
    - Click "Modify"
    - Scroll down to "Deletion protection" and uncheck the box
    - Click "Continue" and then "Modify DB instance"
    - Wait for the modification to complete before proceeding
 
 2. **Disable Cognito Deletion Protection** (only if you want to delete the user pool in step 8):
-   - Navigate to **Amazon Cognito** → User pools → `<STACK-PREFIX>-UserPool`
+   - Navigate to **Amazon Cognito** → User pools → `<STACK-PREFIX>-Api-UserPool`
    - Open the **Settings** tab, edit **Deletion protection**, and turn it off
 
 3. **Delete CloudFormation Stacks:**
    Navigate to AWS CloudFormation console and delete stacks in this order:
    - `<STACK-PREFIX>-Backup`
    - `<STACK-PREFIX>-Amplify`
-   - `<STACK-PREFIX>-CICD`
    - `<STACK-PREFIX>-Api`
    - `<STACK-PREFIX>-KnowledgeBase`
+   - `<STACK-PREFIX>-CICD`
    - `<STACK-PREFIX>-DBFlow`
    - `<STACK-PREFIX>-Database`
    - `<STACK-PREFIX>-VpcStack`
@@ -794,6 +801,7 @@ To take down the deployed stack for a fresh redeployment in the future, follow t
    - Delete the following secrets:
      - `github-personal-access-token`
      - `SpecExSecrets`
+     - `<STACK-PREFIX>/KnowledgeBase/Id` (created by a custom resource, so stack deletion leaves it)
      - Any database credentials created by the stack
 
 5. **Delete SSM Parameters:**
@@ -803,11 +811,11 @@ To take down the deployed stack for a fresh redeployment in the future, follow t
      - `/SpecEx/AllowedEmailDomains`
      - `/SpecEx/LLM/HaikuArn`
      - `/SpecEx/LLM/SonnetArn`
-     - `/SpecEx/API/AllowedOrigins`
+     - `/<STACK-PREFIX>-Api/API/AllowedOrigins`
 
-6. **Delete ECR Repositories** (if any were created):
+6. **Delete ECR Repositories** (kept when the CICD stack is deleted):
    - Navigate to Amazon ECR
-   - Delete repositories created by the stack (e.g. `<STACK-PREFIX>-vectorindexmanagersigv4`)
+   - Delete the repository created by the stack: `<stack-prefix>-cicd-vectorindexmanagersigv4` (lowercase)
 
 7. **Delete Knowledge Base Resources** (if not removed by CloudFormation):
    - Navigate to **Amazon Bedrock** → Knowledge Bases
@@ -817,7 +825,7 @@ To take down the deployed stack for a fresh redeployment in the future, follow t
 
 8. **Delete Retained Data** (only if the data is no longer needed; this cannot be undone):
    Stack deletion keeps these resources so users, chats and documents survive an accidental delete:
-   - **Cognito:** the `<STACK-PREFIX>-UserPool` user pool (turn off deletion protection first, step 2)
+   - **Cognito:** the `<STACK-PREFIX>-Api-UserPool` user pool (turn off deletion protection first, step 2)
    - **S3:** the bucket whose name starts with the first six characters of the stack prefix in lowercase, followed by `-kb-documents` (empty all object versions, then delete it)
    - **RDS:** the final snapshot and retained automated backups under **Snapshots** and **Automated backups → Retained**
    - **AWS Backup:** the recovery points in the `<STACK-PREFIX>-Backup-Vault` vault, then the vault itself
