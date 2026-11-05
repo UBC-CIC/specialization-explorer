@@ -2,7 +2,7 @@
 
 **Project:** Specialization Explorer
 **Document Type:** Public Security Architecture Overview
-**Last Updated:** May 2026
+**Last Updated:** November 2026
 
 ---
 
@@ -99,7 +99,7 @@ Specialization Explorer is an AI-powered conversational application that helps u
 
 | Layer | Components | Security Controls |
 |-------|------------|-------------------|
-| **Edge** | CloudFront, WAF, Shield | DDoS protection, TLS termination, rate limiting |
+| **Edge** | CloudFront (managed by Amplify Hosting) and Shield Standard for the frontend; WAF on the REST API | DDoS protection, TLS termination, rate limiting |
 | **Application** | API Gateway, Lambda | Authentication, authorization, input validation |
 | **Data** | RDS, S3, Secrets Manager | Encryption, access control, credential rotation |
 | **AI/ML** | Bedrock, Knowledge Base | PII protection, prompt security, output validation |
@@ -221,8 +221,8 @@ Each new anonymous user gets a fresh daily quota. Account creation is limited to
 
 | Control | Detail |
 |---------|--------|
-| **OpenAPI Schema** | Request structure validated against specification |
-| **Input Sanitization** | UUID format, length limits, enum validation |
+| **OpenAPI Spec** | API Gateway validates required request parameters (`params-only` validator); bodies are validated by the handlers |
+| **Input Sanitization** | UUID format, length limits, enum and range validation, NUL characters rejected in chat messages |
 | **Parameterized Queries** | SQL injection prevention at the database layer |
 
 ### 4.5 Browser Security Headers
@@ -283,7 +283,7 @@ Amplify Hosting sends these headers with every page:
 |---------|----------------|
 | **Subnet Isolation** | Database in isolated subnets with no internet route |
 | **Security Groups** | The database admits only the RDS Proxy, secret rotation and database initializer security groups; the proxy admits the private and isolated subnet ranges |
-| **VPC Endpoints** | Private connectivity to AWS services (no public internet) |
+| **VPC Endpoints** | Secrets Manager interface endpoint and S3 gateway endpoint (plus SSM when deploying into an existing VPC); other AWS APIs are reached through the NAT gateway |
 | **VPC Flow Logs** | Network traffic auditing |
 
 ### 5.3 Encryption in Transit
@@ -294,7 +294,7 @@ Amplify Hosting sends these headers with every page:
 | WebSocket | WSS |
 | Lambda → RDS Proxy | TLS with certificate and host name verification (Node.js: built-in roots; Python: `verify-full` against the bundled Amazon Trust Services roots) |
 | RDS Proxy → Database | TLS required |
-| Lambda → AWS services | TLS via VPC endpoints |
+| Lambda → AWS services | TLS; Secrets Manager (interface) and S3 (gateway) through VPC endpoints, other services (e.g. Bedrock, SSM, DynamoDB) through the NAT gateway |
 
 ---
 
@@ -360,7 +360,7 @@ The token verifiers re-read the signing key every 5 minutes and accept the previ
 
 > **Status:** Not implemented. Deferred until after the proof of concept.
 
-The POC has no data retention policy, so stored data grows without limit:
+The POC has no data retention policy, so stored data grows without limit (backups are kept for 35 days, but the live data is never pruned):
 
 - `chat_messages` is append-only. Triggers reject direct `UPDATE`, `DELETE`, and `TRUNCATE` (migrations `001` and `004`). Rows can only be removed by the `ON DELETE CASCADE` from `chat_sessions`.
 - Anonymous `users` rows are never purged.
@@ -386,7 +386,7 @@ Keeping chat history and anonymous user records indefinitely is also a privacy c
       ▼
   ┌─────────────────────────────────────────────────────────────┐
   │  1 · INPUT VALIDATION                                       │
-  │      · Length limits (2 000 characters)                     │
+  │      · Length limit (admin setting, default 2 000 chars)    │
   │      · Format validation                                    │
   └───────────────────────────┬─────────────────────────────────┘
                               │
@@ -475,8 +475,8 @@ For guardrail configuration details, see [`Docs/BEDROCK_GUARDRAILS.md`](./BEDROC
                                  ▼
                      ┌───────────────────────┐
                      │  CloudWatch Alarms    │
-                     │  (concurrency, errors,│
-                     │   WAF block rate)     │
+                     │  (concurrency, failed │
+                     │   replies, ingestion) │
                      └───────────────────────┘
 ```
 
@@ -484,19 +484,23 @@ For guardrail configuration details, see [`Docs/BEDROCK_GUARDRAILS.md`](./BEDROC
 
 | Log Type | Content | Retention |
 |----------|---------|-----------|
-| **API Access Logs** | Request metadata, status codes, latency | 1 week |
+| **API Access Logs** | Request metadata, status codes, latency | 90 days |
 | **WAF Logs** | Blocked and counted requests, `Authorization` header redacted | 90 days |
-| **Lambda Logs** | Function execution, errors (body excluded) | 1 week |
-| **VPC Flow Logs** | Network traffic metadata | Configurable |
-| **WebSocket Logs** | Connection events, route keys | 1 week |
+| **Lambda Logs** | Function execution, errors (body excluded), structured audit records | 1 month |
+| **Audit Records** | One JSON line (`"audit": true`) per state-changing, admin or denied request, and per token issuance: actor, action, target IDs, outcome; no message content | 1 month (in the Lambda logs) |
+| **RDS Logs** | PostgreSQL engine and upgrade logs | 90 days |
+| **VPC Flow Logs** | Network traffic metadata | 90 days in `dev`, 2 years otherwise |
+| **WebSocket Logs** | Connection events, route keys (no query string, which carries the token) | 1 week |
 
 ### 8.3 Alerting
 
 | Alert | Trigger | Purpose |
 |-------|---------|---------|
-| **Concurrency Alarm** | Lambda approaching reserved limit | Prevent service degradation |
-| **Error Rate Alarm** | Elevated 5XX responses | Detect service issues |
-| **WAF Block Alarm** | High block rate | Detect attack patterns |
+| **Concurrency Alarms** | Text generation, authorizer, public token and WebSocket functions approaching their concurrency limits | Prevent service degradation |
+| **Text Generation Failure Alarms** | Failed asynchronous replies reach the failure queue, cannot be delivered to it, or land in its dead-letter queue | Detect failed chat replies |
+| **Knowledge Base Alarms** | An ingestion job fails, or finishes with failed documents | Detect ingestion problems |
+
+No alarm watches API 5XX rates or the WAF block rate; WAF metrics and sampled requests are available in CloudWatch.
 
 ### 8.4 Compliance Summary
 
@@ -505,11 +509,12 @@ For guardrail configuration details, see [`Docs/BEDROCK_GUARDRAILS.md`](./BEDROC
 | **Encryption at Rest** | ✅ Enabled | AWS managed keys (CMK upgrade available — see [`AWS_MANAGED_KEYS.md`](./AWS_MANAGED_KEYS.md)) |
 | **Encryption in Transit** | ✅ Enabled | TLS enforced on all connections |
 | **Access Control** | ✅ Enabled | Role-based, least privilege |
-| **Audit Logging** | ✅ Enabled | Comprehensive logging across all layers |
+| **Audit Logging** | ✅ Enabled | Structured audit records for admin, state-changing and denied requests, plus access, WAF and flow logs |
+| **Backups** | ✅ Enabled | Daily AWS Backup of the database and knowledge base bucket, kept 35 days; 7-day RDS automated backups |
 | **Credential Management** | ✅ Enabled | Secrets Manager with automatic rotation |
 | **PII Protection** | ✅ Enabled | Automatic anonymization via Bedrock Guardrails |
-| **Input Validation** | ✅ Enabled | Schema and application-level validation |
-| **Rate Limiting** | ✅ Enabled | Multi-layer WAF and API Gateway throttling |
+| **Input Validation** | ✅ Enabled | Gateway parameter validation and application-level validation |
+| **Rate Limiting** | ✅ Enabled | WAF rate rules, API Gateway throttling, per-user message rate (DynamoDB) and daily quota |
 | **Data Retention** | ⚠️ Post-POC | No retention policy; chat data and anonymous users kept indefinitely (see [6.5](#65-data-retention-post-poc)) |
 
 ---

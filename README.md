@@ -28,7 +28,7 @@ Please refer to the [Web App User Guide](Docs/USER_GUIDE.md) for instructions on
 
 ## Knowledge Base
 
-Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION.md) as it explains how the project uses Bedrock Knowledges Bases. This includes the data source state machine, S3 and website ingestion phases, scheduler polling, retry behavior, and admin dashboard integration.
+Please refer to [Knowledge Base Documentation](Docs/KNOWLEDGE_BASE_DOCUMENTATION.md) as it explains how the project uses Bedrock Knowledge Bases. This includes the data source state machine, S3 and website ingestion phases, scheduler polling, retry behavior, and admin dashboard integration.
 
 ## Directories
 
@@ -45,14 +45,19 @@ Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION
 │   │   │   ├── preSignUp.js
 │   │   │   └── userAuthorizerFunction.js
 │   │   ├── db_setup/
+│   │   │   ├── certs/
 │   │   │   ├── migrations/
-│   │   │   │   └── 000_initial_schema.js
+│   │   │   │   ├── 000_initial_schema.js
+│   │   │   │   ├── ...
+│   │   │   │   └── 006_drop_vector_extension.js
 │   │   │   └── index.js
 │   │   ├── ecrImageWaiter/
 │   │   │   ├── index.js
-│   │   │   └── package.json
+│   │   │   ├── package.json
+│   │   │   └── README.md
 │   │   ├── handlers/
 │   │   │   ├── utils/
+│   │   │   │   ├── audit.js
 │   │   │   │   ├── cors.js
 │   │   │   │   ├── handlerUtils.js
 │   │   │   │   └── validation.js
@@ -61,6 +66,8 @@ Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION
 │   │   │   ├── initializeConnection.js
 │   │   │   ├── systemMessagesHandler.js
 │   │   │   └── userHandler.js
+│   │   ├── jwtSecretRotation/
+│   │   │   └── index.js
 │   │   ├── knowledgeBase/
 │   │   │   ├── helpers/
 │   │   │   └── main.py
@@ -79,6 +86,8 @@ Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION
 │   │   │   ├── requirements.in
 │   │   │   └── requirements.txt
 │   │   └── websocket/
+│   │       ├── asyncFailure.js
+│   │       ├── authorizer.js
 │   │       ├── connect.js
 │   │       ├── default.js
 │   │       └── disconnect.js
@@ -90,11 +99,14 @@ Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION
 │   ├── lib/
 │   │   ├── amplify-stack.ts
 │   │   ├── api-stack.ts
+│   │   ├── backup-stack.ts
 │   │   ├── cicd-stack.ts
 │   │   ├── database-stack.ts
 │   │   ├── dbFlow-stack.ts
 │   │   ├── knowledge-base-stack.ts
+│   │   ├── log-retention.ts
 │   │   └── vpc-stack.ts
+│   ├── test/
 │   └── OpenAPI_Swagger_Definition.yaml
 │
 ├── Docs/
@@ -106,6 +118,7 @@ Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION
 │   ├── DATABASE_MIGRATIONS.md
 │   ├── DEPENDENCY_MANAGEMENT.MD
 │   ├── DEPLOYMENT_GUIDE.md
+│   ├── KNOWLEDGE_BASE_DOCUMENTATION.md
 │   ├── MODIFICATION_GUIDE.md
 │   ├── SECURITY_OVERVIEW.md
 │   └── USER_GUIDE.md
@@ -144,14 +157,17 @@ Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION
 
 ### Backend
 
-- **AWS Lambda** (Python 3.12 and Node.js 24) for serverless compute
+- **AWS Lambda** (Python 3.12 and Node.js 24) for serverless compute; the vector index manager runs as a container image on Python 3.14
 - **Amazon Bedrock** for LLM inference — Claude Haiku 5.5 and Claude Sonnet 5.5 (Anthropic)
 - **Amazon Bedrock Knowledge Base** with **Cohere Embed English v3** for vector embeddings
+- **Amazon Bedrock Guardrails** for PII anonymization and prompt attack blocking
 - **Amazon OpenSearch Serverless** for vector storage and similarity search
 - **PostgreSQL** (RDS) for relational data storage
+- **Amazon DynamoDB** for per-user WebSocket message rate limits
 - **Amazon S3** for knowledge base document storage
+- **Amazon EventBridge Scheduler** for polling knowledge base ingestion jobs
 - **API Gateway** (REST and WebSocket) for APIs
-- **AWS Cognito** for authentication and authorization
+- **AWS Cognito** for administrator authentication
 
 ### Infrastructure
 
@@ -159,6 +175,8 @@ Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION
 - **AWS CodePipeline** for CI/CD (Docker image builds)
 - **Amazon RDS** with RDS Proxy for managed PostgreSQL
 - **Amazon VPC** for network isolation
+- **AWS WAF** in front of the REST API
+- **AWS Backup** for daily backups of the database and knowledge base bucket
 
 ## Additional Documentation
 
@@ -172,12 +190,14 @@ Please refer to [Knowledge Base Documentation](docs/KNOWLEDGE_BASE_DOCUMENTATION
 - **[Deployment Guide](Docs/DEPLOYMENT_GUIDE.md)**: Step-by-step instructions for deploying to AWS
 - **[Modification Guide](Docs/MODIFICATION_GUIDE.md)**: Guidelines for customizing and extending the application
 - **[Bedrock Guardrails](Docs/BEDROCK_GUARDRAILS.md)**: Configuration and management of AWS Bedrock guardrails for AI safety
+- **[AWS Managed Keys](Docs/AWS_MANAGED_KEYS.md)**: Where AWS managed keys are used and how to switch to customer-managed KMS keys
 
 ### Development and Maintenance
 
 - **[Database Migrations](Docs/DATABASE_MIGRATIONS.md)**: Guide to the database migration system and best practices
 - **[Dependency Management](Docs/DEPENDENCY_MANAGEMENT.MD)**: Managing Python dependencies in Lambda functions using pip-tools
-- **[Changelog](Docs/CHANGELOG.md)**: Version history and release notes
+- **[Knowledge Base Documentation](Docs/KNOWLEDGE_BASE_DOCUMENTATION.md)**: How data sources are staged, synced and ingested
+- **[ECR Image Waiter](cdk/lambda/ecrImageWaiter/README.md)**: Custom resource that waits for the vector index manager image on first deployment
 
 ### API and Usage
 

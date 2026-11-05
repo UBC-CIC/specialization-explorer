@@ -26,7 +26,7 @@ The Specialization Explorer project uses a `node-pg-migrate` system to manage da
 
    ```bash
    ls cdk/lambda/db_setup/migrations/ | tail -1
-   # Use next sequential number (e.g., if last is 000, use 001)
+   # Use the next sequential number (the last is currently 006, so use 007)
    ```
 
 2. **Create migration file:**
@@ -58,18 +58,40 @@ The migration system is built on `node-pg-migrate` and consists of:
 - **Migration Files**: Located in `cdk/lambda/db_setup/migrations/` with numbered JavaScript files
 - **Migration Runner**: The `index.js` file contains the main migration execution logic
 - **Migration Tracking**: Uses a `pgmigrations` table to track which migrations have been applied
-- **Automatic Execution**: Runs during CDK deployments via AWS Lambda
+- **Automatic Execution**: The `<StackPrefix>-DBFlow-initializerFunction` Lambda is a CDK `TriggerFunction`, so it runs on every deployment of the DBFlow stack. Its description includes the synth time, so each deployment runs it again.
+
+The runner connects to the database instance directly (not through RDS Proxy) as the admin user, with TLS verified against the RDS CA bundle in `certs/global-bundle.pem`. After the migrations it creates or updates the `readwrite` and `tablecreator` roles and the `app_rw` and `app_tc` users, gives them new random passwords and writes those to Secrets Manager. `node-pg-migrate` and `pg` come from the `layers/node-pg-migrate.zip` Lambda layer.
 
 ### Key Components
 
 ```
 cdk/lambda/db_setup/
-├── index.js              # Main entry point, runs node-pg-migrate
-├── initializer.py        # Database initialization utilities
+├── index.js              # Main entry point: runs node-pg-migrate, then creates the app users
+├── certs/
+│   └── global-bundle.pem # RDS CA bundle used to verify the database certificate
 └── migrations/           # Migration files directory
     ├── 000_initial_schema.js
-    └── ...
+    ├── 001_chat_messages_append_only.js
+    ├── 002_prompt_formatting_style.js
+    ├── 003_user_key_hash.js
+    ├── 004_chat_messages_no_delete.js
+    ├── 005_chat_messages_session_created_at_index.js
+    └── 006_drop_vector_extension.js
 ```
+
+### Current Migrations
+
+| Migration | Change |
+| --- | --- |
+| `000_initial_schema` | Enums, tables, indexes, foreign keys, and seed `system_settings` and `system_messages` rows |
+| `001_chat_messages_append_only` | Trigger that rejects `UPDATE` on `chat_messages` |
+| `002_prompt_formatting_style` | Adds a `STYLE:` line to the active `system_instructions` and `initial_prompt` as a new version |
+| `003_user_key_hash` | Adds `users.user_key_hash` and `users.user_key_version` for anonymous user keys |
+| `004_chat_messages_no_delete` | `ON DELETE CASCADE` from `chat_sessions`; triggers that reject direct `DELETE` and `TRUNCATE` on `chat_messages` |
+| `005_chat_messages_session_created_at_index` | Index on `(chat_session_id, created_at, id)`, replacing the single-column index |
+| `006_drop_vector_extension` | Drops the unused `vector` extension (embeddings live in OpenSearch Serverless) |
+
+Because of `001` and `004`, a migration cannot update or delete rows in `chat_messages` directly. Delete the parent `chat_sessions` rows instead, or drop and recreate the triggers inside the migration if a change is truly required.
 
 ## Migration Files Structure
 
@@ -182,7 +204,7 @@ graph TD
 
    ```bash
    # Example: Adding audit table
-   touch cdk/lambda/db_setup/migrations/001_add_audit_table.js
+   touch cdk/lambda/db_setup/migrations/007_add_audit_table.js
    ```
 
 3. **Write the migration:**
@@ -348,9 +370,10 @@ exports.up = (pgm) => {
 ```javascript
 exports.up = (pgm) => {
   pgm.sql(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`);
-  pgm.sql(`CREATE EXTENSION IF NOT EXISTS "vector";`);
 };
 ```
+
+The `vector` (pgvector) extension was removed in migration `006`; embeddings are stored in OpenSearch Serverless, not PostgreSQL.
 
 ### Data Migrations
 
@@ -359,7 +382,7 @@ exports.up = (pgm) => {
   // Insert default data
   pgm.sql(`
     INSERT INTO system_settings (max_messages_per_day)
-    VALUES (45)
+    SELECT 45
     WHERE NOT EXISTS (SELECT 1 FROM system_settings);
   `);
 
@@ -376,33 +399,35 @@ exports.up = (pgm) => {
 
 ### Automatic Execution
 
-Migrations run automatically during:
+Migrations run automatically every time the `<StackPrefix>-DBFlow` stack is deployed (for example with `npx cdk deploy --all`), through the initializer trigger function. To re-run them without other changes, redeploy that stack:
 
-- **CDK deployment**: When the database setup Lambda function is triggered
-- **Database initialization**: First-time database setup
-- **Stack updates**: When infrastructure changes are deployed
+```bash
+npx cdk deploy <StackPrefix>-DBFlow --profile <YOUR-PROFILE-NAME>
+```
+
+Check the `/aws/lambda/<StackPrefix>-DBFlow-initializerFunction` log group for the node-pg-migrate output. A failing migration fails the trigger, and with it the DBFlow stack deployment.
 
 ### Manual Execution (Development)
 
-For development or troubleshooting:
+The database is in isolated subnets and requires TLS, so it cannot be reached from a laptop. To test migrations, run them against a local PostgreSQL 16:
 
 ```bash
-# Navigate to the lambda directory
-cd cdk/lambda/db_setup
+# From the repository root, in a scratch directory
+npm install node-pg-migrate pg
 
-# Install dependencies
-npm install
-
-# Run migrations directly using node-pg-migrate
 node -e "
-const { migrate } = require('node-pg-migrate');
+const migrate = require('node-pg-migrate').default;
 migrate({
-  databaseUrl: 'postgresql://user:pass@host:5432/db',
-  dir: './migrations',
-  direction: 'up'
+  databaseUrl: 'postgresql://user:pass@localhost:5432/specEx',
+  dir: 'cdk/lambda/db_setup/migrations',
+  direction: 'up',
+  count: Infinity,
+  migrationsTable: 'pgmigrations',
 }).then(() => console.log('Done'));
 "
 ```
+
+Use the same major version of `node-pg-migrate` as the Lambda layer.
 
 ## Safety Guidelines
 
@@ -464,8 +489,8 @@ exports.up = (pgm) => {
     INSERT INTO system_settings (
       max_messages_per_day,
       min_messages_before_suggest,
-      max_chatacters_per_user_message,
-      max_chatacters_per_ai_message,
+      max_characters_per_user_message,
+      max_characters_per_ai_message,
       temperature,
       top_p,
       specialization_list,
@@ -578,8 +603,9 @@ exports.up = (pgm) => {
 
 ### Rollback Considerations
 
-- **Forward-only approach**: The system primarily supports forward migrations
+- **Forward-only approach**: The runner only migrates `up`; the `down` functions are never called automatically
 - **Manual rollbacks**: Rollback procedures must be handled manually if needed
+- **Backups**: The instance keeps 7 days of automated backups, and AWS Backup takes a daily recovery point kept for 35 days
 - **Data loss prevention**: Always backup before major schema changes
 
 ### Best Practices Summary

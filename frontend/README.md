@@ -1,75 +1,29 @@
-# React + TypeScript + Vite
+# Specialization Explorer Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + TypeScript app built with Vite, Tailwind CSS and shadcn/ui. The React Compiler is enabled through `babel-plugin-react-compiler` in `vite.config.ts`. In deployment the app is built and hosted by AWS Amplify (see the [Deployment Guide](../Docs/DEPLOYMENT_GUIDE.md)).
 
-Currently, two official plugins are available:
+## Environment variables
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+Amplify sets these at build time from the CDK outputs. To run the app locally, put them in `frontend/.env.local` (do not commit it), using the values from the Amplify app's environment variables:
 
-## React Compiler
+| Variable | Value |
+| --- | --- |
+| `VITE_API_ENDPOINT` | REST API stage URL |
+| `VITE_WEBSOCKET_URL` | WebSocket URL including the stage, e.g. `wss://<id>.execute-api.<region>.amazonaws.com/prod` |
+| `VITE_COGNITO_USER_POOL_ID` | Cognito user pool ID |
+| `VITE_COGNITO_USER_POOL_CLIENT_ID` | Cognito app client ID |
 
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
+Amplify also sets `VITE_AWS_REGION` and `VITE_IDENTITY_POOL_ID`, which the current code does not read.
 
-Note: This will impact Vite dev & build performances.
+The API only answers origins listed in the `/<STACK-PREFIX>-Api/API/AllowedOrigins` SSM parameter, so `http://localhost:5173` must be in that list for local development (see "Adding Custom Allowed Origins" in the Deployment Guide).
 
-## Expanding the ESLint configuration
+## Commands
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+- `npm install`: install dependencies
+- `npm run dev`: start the Vite dev server
+- `npm run build`: type-check and build to `dist/`
+- `npm run lint`: run ESLint
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Layout
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
-
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+`src/` contains `pages/` (route-level pages), `components/` (including `Admin/`, `ChatInterface/` and the shadcn `ui/` primitives), `providers/` (React context for the user, sidebar and view state), `hooks/`, `lib/`, `functions/`, `layouts/` and `types/`. The `@` import alias maps to `src/`.
