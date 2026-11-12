@@ -17,7 +17,7 @@ async function initializeConnection(SM_DB_CREDENTIALS, RDS_PROXY_ENDPOINT) {
 
     const credentials = JSON.parse(secretResponse.SecretString);
 
-    console.log(`Connecting to database with user: ${credentials.username}`);
+    console.log("Connecting to database");
 
     const connectionConfig = {
       host: RDS_PROXY_ENDPOINT,
@@ -37,11 +37,6 @@ async function initializeConnection(SM_DB_CREDENTIALS, RDS_PROXY_ENDPOINT) {
     console.log("Database connection initialized and tested successfully");
   } catch (error) {
     console.error("Error initializing database connection:", error);
-    console.error("Connection details:", {
-      host: RDS_PROXY_ENDPOINT,
-      username: credentials?.username,
-      database: credentials?.dbname,
-    });
     throw new Error(
       `Failed to initialize database connection: ${error.message}`
     );

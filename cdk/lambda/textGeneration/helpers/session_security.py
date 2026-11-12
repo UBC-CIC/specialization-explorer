@@ -15,11 +15,21 @@ def sanitize_session_id(session_id: str) -> str:
 
     # Check 3: Rejection anything that's not a valid uuid 
     try: 
-        uuid.UUID(session_id)
+        parsed = uuid.UUID(session_id)
     except ValueError:
         raise ValueError(f"Invalid session ID: {session_id}")
     
-    return session_id
+    # Return the canonical form: Python accepts prefixes, braces and misplaced
+    # hyphens that Postgres rejects, so the raw string must not reach the query
+    return str(parsed)
+
+def _rollback(db_connection) -> None:
+    # Clear the aborted transaction so the reused connection stays usable
+    try:
+        db_connection.rollback()
+    except Exception as e:
+        logger.error(f"Rollback failed: {e}")
+
 
 def validate_session_ownership(db_connection, session_id: str, user_id: str) -> bool:
     if not session_id or not user_id: 
@@ -38,6 +48,7 @@ def validate_session_ownership(db_connection, session_id: str, user_id: str) -> 
             return is_owner
         
     except Exception as e: 
+        _rollback(db_connection)
         logger.error(f"DB Error: {e}")
         return False
 
@@ -48,5 +59,6 @@ def session_exists(db_connection, session_id: str) -> bool:
             cursor.execute("SELECT 1 FROM chat_sessions WHERE id = %s", (session_id,))
             return cursor.fetchone() is not None
     except Exception as e:
+        _rollback(db_connection)
         logger.error(f"DB Error: {e}")
         return True
