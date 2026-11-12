@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useSidebar } from "@/providers/sidebar";
 import { useNavigate } from "react-router";
@@ -22,11 +23,19 @@ function SidebarContent({
     removeChatSession,
   } = useView();
 
+  const [isCreatingChat, setIsCreatingChat] = useState(false);
+
   const handleNewChat = async () => {
-    const newSession = await createNewChatSession();
-    if (newSession) {
-      navigate(`/chat`);
-      setMobileOpen(false);
+    if (isCreatingChat) return;
+    setIsCreatingChat(true);
+    try {
+      const newSession = await createNewChatSession();
+      if (newSession) {
+        navigate(`/chat`);
+        setMobileOpen(false);
+      }
+    } finally {
+      setIsCreatingChat(false);
     }
   };
 
@@ -51,8 +60,10 @@ function SidebarContent({
             variant="link"
             size="icon"
             onClick={handleNewChat}
-            className="text-muted-foreground hover:text-foreground cursor-pointer h-6 w-6"
+            disabled={isCreatingChat}
+            className="text-muted-foreground hover:text-foreground cursor-pointer h-6 w-6 disabled:opacity-50 disabled:cursor-not-allowed"
             title="New chat"
+            aria-label="New chat"
           >
             <Plus className="h-4 w-4" />
           </Button>
