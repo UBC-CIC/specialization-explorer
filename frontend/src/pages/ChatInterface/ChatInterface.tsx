@@ -42,6 +42,8 @@ export default function AIChatPage() {
     updateChatSessionName,
   } = useView();
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+  // Session whose history has finished loading; the intro only starts for that session
+  const [historyLoadedFor, setHistoryLoadedFor] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(
     null
@@ -303,6 +305,9 @@ export default function AIChatPage() {
     // This fixes the bug where AI doesn't start a new conversation after a previous one
     hasStartedRef.current = false;
 
+    // Set when the user switches chats, so a slow response for an earlier chat is discarded
+    let cancelled = false;
+
     const loadChatHistory = async () => {
       setIsLoadingHistory(true);
       try {
@@ -330,12 +335,14 @@ export default function AIChatPage() {
         }
 
         const data: { messages: ChatMessageRow[] } = await response.json();
+        if (cancelled) return;
 
-        const rawMessages = data.messages || [];
-        // Optimized check: Skip first message ONLY if it matches the system prompt
-        const startIndex = (rawMessages.length > 0 && rawMessages[0].content === WELCOME_PROMPT) ? 1 : 0;
+        // The intro prompt is saved as a user message but is never shown, wherever it sorts
+        const rawMessages = (data.messages || []).filter(
+          (m) => !(m.sender === "user" && m.content.trim() === WELCOME_PROMPT.trim())
+        );
 
-        const chatMessages: Message[] = rawMessages.slice(startIndex).map((m) => {
+        const chatMessages: Message[] = rawMessages.map((m) => {
           let parsedSources: any[] = [];
           if (m.sender === "AI" && m.sources) {
             if (Array.isArray(m.sources)) {
@@ -367,13 +374,21 @@ export default function AIChatPage() {
 
         setMessages(chatMessages);
       } catch (error) {
+        if (cancelled) return;
         console.error("Failed to load chat history:", error);
       } finally {
-        setIsLoadingHistory(false);
+        if (!cancelled) {
+          setHistoryLoadedFor(activeChatSessionId);
+          setIsLoadingHistory(false);
+        }
       }
     };
 
     loadChatHistory();
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeChatSessionId, userId]);
 
   const startConversation = useCallback(async () => {
@@ -501,10 +516,16 @@ export default function AIChatPage() {
 
   // Auto-start conversation if history is empty
   useEffect(() => {
-    if (!isLoadingHistory && messages.length === 0 && activeChatSessionId && !hasStartedRef.current) {
+    if (
+      !isLoadingHistory &&
+      historyLoadedFor === activeChatSessionId &&
+      messages.length === 0 &&
+      activeChatSessionId &&
+      !hasStartedRef.current
+    ) {
       startConversation();
     }
-  }, [isLoadingHistory, messages.length, activeChatSessionId, startConversation]);
+  }, [isLoadingHistory, historyLoadedFor, messages.length, activeChatSessionId, startConversation]);
 
   async function sendMessage() {
     if (isStreaming) return;

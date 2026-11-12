@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Outlet, useNavigate } from "react-router";
 import { ViewProvider } from "@/providers/ViewContext";
 import { SidebarProvider } from "@/providers/SidebarContext";
@@ -20,6 +20,8 @@ import {
 const DEFAULT_WELCOME_MESSAGE =
   "Together we will try to find the right program for you. Click below to start a new conversation:";
 const DEFAULT_DISCLAIMER = "AI can make mistakes. Check important info.";
+// Minimum time between new chats, to absorb repeated clicks on slow devices
+const NEW_CHAT_COOLDOWN_MS = 1500;
 
 type UserProfile = {
   id: string;
@@ -52,6 +54,9 @@ type UpdateUserEmailResult =
 export default function HomePage() {
   const { userId, isLoading: isLoadingUser } = useUser();
   const navigate = useNavigate();
+
+  const isCreatingChatRef = useRef(false);
+  const lastChatCreatedAtRef = useRef(0);
 
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeChatSessionId, setActiveChatSessionId] = useState<string | null>(
@@ -336,10 +341,14 @@ const normalizeChatSession = (session: any): ChatSession => ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, isLoadingUser]);
 
-  // Create a new chat session
+  // Create a new chat session. Repeat requests are ignored while one is in flight and for a
+  // short time afterwards, so impatient clicks on a slow device do not create extra chats.
   const createNewChatSession = async (): Promise<ChatSession | null> => {
     if (!userId) return null;
+    if (isCreatingChatRef.current) return null;
+    if (Date.now() - lastChatCreatedAtRef.current < NEW_CHAT_COOLDOWN_MS) return null;
 
+    isCreatingChatRef.current = true;
     try {
       const { token } = await getPublicToken();
 
@@ -364,11 +373,14 @@ const normalizeChatSession = (session: any): ChatSession => ({
       // Add to the list and set as active
       setChatSessions((prev) => [newSession, ...prev]);
       setActiveChatSessionId(newSession.id);
+      lastChatCreatedAtRef.current = Date.now();
 
       return newSession;
     } catch (err) {
       console.error("Error creating chat session:", err);
       return null;
+    } finally {
+      isCreatingChatRef.current = false;
     }
   };
 
