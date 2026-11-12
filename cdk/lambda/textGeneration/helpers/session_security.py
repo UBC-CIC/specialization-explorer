@@ -15,11 +15,13 @@ def sanitize_session_id(session_id: str) -> str:
 
     # Check 3: Rejection anything that's not a valid uuid 
     try: 
-        uuid.UUID(session_id)
+        parsed = uuid.UUID(session_id)
     except ValueError:
         raise ValueError(f"Invalid session ID: {session_id}")
     
-    return session_id
+    # Return the canonical form: Python accepts prefixes, braces and misplaced
+    # hyphens that Postgres rejects, so the raw string must not reach the query
+    return str(parsed)
 
 def _rollback(db_connection) -> None:
     # Clear the aborted transaction so the reused connection stays usable
