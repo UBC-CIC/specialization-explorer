@@ -1789,6 +1789,8 @@ export class ApiGatewayStack extends cdk.Stack {
     // The chat page sends a warm-up every 5 minutes.
     defaultFunction.addEnvironment("MESSAGE_RATE_LIMIT_PER_MINUTE", "10");
     defaultFunction.addEnvironment("WARMUP_RATE_LIMIT_PER_MINUTE", "2");
+    // Counts every frame the route receives, valid or not
+    defaultFunction.addEnvironment("FRAME_RATE_LIMIT_PER_MINUTE", "30");
 
     defaultFunction.addEnvironment('ALLOWED_ORIGIN_PARAM', this.allowedOriginsParamName);
     defaultFunction.addToRolePolicy(new iam.PolicyStatement({

@@ -42,6 +42,9 @@ const parseLimit = (value, fallback) => {
 const RATE_WINDOW_SECONDS = 60;
 const MESSAGE_RATE_LIMIT = parseLimit(process.env.MESSAGE_RATE_LIMIT_PER_MINUTE, 10);
 const WARMUP_RATE_LIMIT = parseLimit(process.env.WARMUP_RATE_LIMIT_PER_MINUTE, 2);
+// Every frame counts against this, including malformed ones, so a client cannot exhaust the
+// shared stage throttle by sending frames that never reach the message limit
+const FRAME_RATE_LIMIT = parseLimit(process.env.FRAME_RATE_LIMIT_PER_MINUTE, 30);
 
 const RATE_LIMIT_MESSAGE = "You're sending messages too quickly. Please wait a minute and try again.";
 const UNAVAILABLE_MESSAGE = "Sorry, your message could not be sent. Please try again.";
@@ -105,6 +108,22 @@ exports.handler = async (event) => {
   });
 
   try {
+    const frameUserId = event.requestContext?.authorizer?.userId;
+    if (!validateUUID(frameUserId, "user_id").valid) {
+      return { statusCode: 401, body: JSON.stringify({ error: "Unauthorized" }) };
+    }
+    let frameAllowed;
+    try {
+      frameAllowed = await consumeRateLimit(frameUserId, "frame", FRAME_RATE_LIMIT);
+    } catch (error) {
+      console.error("Frame rate limit check failed", { error: error?.name });
+      return { statusCode: 503, body: JSON.stringify({ error: "Service unavailable" }) };
+    }
+    if (!frameAllowed) {
+      console.warn("Frame rate limit exceeded", { connectionId: event.requestContext.connectionId });
+      return { statusCode: 429, body: JSON.stringify({ error: "Rate limit exceeded" }) };
+    }
+
     const body = JSON.parse(event.body);
     const { action, query, chat_session_id, is_intro_message, message_id } = body;
 
