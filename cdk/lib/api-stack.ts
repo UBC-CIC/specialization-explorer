@@ -260,6 +260,25 @@ export class ApiGatewayStack extends cdk.Stack {
       authFlows: {
         userSrp: true,
       },
+      // Email identifies the administrator in the API, so a signed-in administrator cannot
+      // change it themselves; every other standard attribute stays writable
+      writeAttributes: new cognito.ClientAttributes().withStandardAttributes({
+        address: true,
+        birthdate: true,
+        familyName: true,
+        fullname: true,
+        gender: true,
+        givenName: true,
+        locale: true,
+        middleName: true,
+        nickname: true,
+        phoneNumber: true,
+        preferredUsername: true,
+        profilePage: true,
+        profilePicture: true,
+        timezone: true,
+        website: true,
+      }),
       // Sign-in and password reset errors do not reveal whether an account exists
       preventUserExistenceErrors: true,
     });
