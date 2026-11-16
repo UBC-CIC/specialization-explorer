@@ -10,6 +10,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "postgres": "^3.2.4"
+    "postgres": "^4.1.1"
   }
 }
