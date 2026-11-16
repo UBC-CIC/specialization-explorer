@@ -7,6 +7,7 @@ const {
 const {
   ApiGatewayManagementApiClient,
   PostToConnectionCommand,
+  DeleteConnectionCommand,
 } = require("@aws-sdk/client-apigatewaymanagementapi");
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -98,6 +99,29 @@ const notifyClient = async (connectionId, error, message) => {
   }
 };
 
+// Tells the client a pending message was not sent, then closes the connection
+const closeExpiredConnection = async (event) => {
+  const connectionId = event.requestContext.connectionId;
+  let action;
+  try {
+    action = JSON.parse(event.body)?.action;
+  } catch {
+    action = undefined;
+  }
+  if (action === "generate_text") {
+    await notifyClient(connectionId, "MESSAGE_NOT_SENT", UNAVAILABLE_MESSAGE);
+  }
+  if (!apigw) {
+    console.error("WEBSOCKET_API_ENDPOINT is not set");
+    return;
+  }
+  try {
+    await apigw.send(new DeleteConnectionCommand({ ConnectionId: connectionId }));
+  } catch (error) {
+    console.error("Failed to close expired connection", { connectionId, error: error?.name });
+  }
+};
+
 exports.handler = async (event) => {
   console.log("WebSocket message received:", {
     connectionId: event.requestContext.connectionId,
@@ -122,6 +146,14 @@ exports.handler = async (event) => {
     if (!frameAllowed) {
       console.warn("Frame rate limit exceeded", { connectionId: event.requestContext.connectionId });
       return { statusCode: 429, body: JSON.stringify({ error: "Rate limit exceeded" }) };
+    }
+
+    // Authorization is checked once when the socket opens, so the token's expiry is enforced
+    // here. The client reconnects with a fresh token after the connection is closed.
+    const tokenExp = Number(event.requestContext?.authorizer?.tokenExp);
+    if (Number.isFinite(tokenExp) && Date.now() / 1000 >= tokenExp) {
+      await closeExpiredConnection(event);
+      return { statusCode: 401, body: JSON.stringify({ error: "Token expired" }) };
     }
 
     const body = JSON.parse(event.body);
