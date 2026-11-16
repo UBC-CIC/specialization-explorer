@@ -79,7 +79,7 @@ function sanitizeString(value, maxLength = 10000) {
  * @param {number} max - Maximum allowed value
  * @returns {number}
  */
-function parsePositiveInt(value, defaultValue, max = Infinity) {
+function parsePositiveInt(value, defaultValue, max = 1000) {
     const parsed = parseInt(value);
     if (isNaN(parsed) || parsed < 0) return defaultValue;
     return Math.min(parsed, max);

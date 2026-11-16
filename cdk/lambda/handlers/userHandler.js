@@ -426,7 +426,7 @@ exports.handler = async (event) => {
         }
 
         const limit = parsePositiveInt(event.queryStringParameters?.limit, 200, 1000) || 200;
-        const offset = parsePositiveInt(event.queryStringParameters?.offset, 0);
+        const offset = parsePositiveInt(event.queryStringParameters?.offset, 0, 100000);
 
         const rows = await sqlConnection`
           SELECT
