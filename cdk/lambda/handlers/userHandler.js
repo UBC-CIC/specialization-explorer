@@ -266,7 +266,7 @@ exports.handler = async (event) => {
           break;
         }
 
-        if (!EMAIL_REGEX.test(normalizedEmail)) {
+        if (normalizedEmail.length > MAX_EMAIL_LENGTH || !EMAIL_REGEX.test(normalizedEmail)) {
           response.statusCode = 400;
           response.body = JSON.stringify({ error: "Invalid email format" });
           break;
