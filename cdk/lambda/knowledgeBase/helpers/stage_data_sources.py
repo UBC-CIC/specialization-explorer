@@ -55,6 +55,12 @@ MAX_WEBSITE_URL_LENGTH = 2048
 MAX_CRAWLER_PATTERNS = 20
 MAX_CRAWLER_PATTERN_LENGTH = 500
 _MATCH_ALL_PATTERNS = {"", ".*", ".+", "(.*)", "(.+)"}
+# Unrelated URLs; a pattern that matches all of them is not specific to any site
+_PROBE_URLS = (
+    "https://probe-one.example/",
+    "http://probe-two.invalid/a/b?c=d",
+    "https://www.probe-three.test/index.html",
+)
 
 
 def _validate_website_request(name, include_patterns, exclude_patterns) -> str | None:
@@ -76,11 +82,21 @@ def _validate_website_request(name, include_patterns, exclude_patterns) -> str |
             except re.error:
                 return f"{field} contains an invalid regular expression"
 
-    # A match-all include filter would widen the crawl of every seed on the shared crawler
-    for pattern in include_patterns:
-        if pattern.strip().removeprefix("^").removesuffix("$") in _MATCH_ALL_PATTERNS:
-            return "include_patterns must not match every URL"
+    # Filters are merged into the shared crawler, so a match-all include widens the crawl of
+    # every seed and a match-all exclude blocks every seed
+    for field, patterns in (("include_patterns", include_patterns), ("exclude_patterns", exclude_patterns)):
+        for pattern in patterns:
+            if _matches_every_url(pattern):
+                return f"{field} must not match every URL"
     return None
+
+
+def _matches_every_url(pattern: str) -> bool:
+    """True for a pattern that matches every URL, however it is written."""
+    if pattern.strip().removeprefix("^").removesuffix("$") in _MATCH_ALL_PATTERNS:
+        return True
+    # Equivalent spellings such as ".{0,}" or "[\s\S]*" match unrelated URLs alike
+    return all(re.search(pattern, probe) for probe in _PROBE_URLS)
 
 
 def _is_markdown_file(file_name: str) -> bool:
