@@ -5,6 +5,6 @@
   "dependencies": {
     "node-pg-migrate": "^7.0.0",
     "pg": "^8.11.0",
-    "@aws-sdk/client-secrets-manager": "^3.645.0"
+    "@aws-sdk/client-secrets-manager": "^3.1169.0"
   }
 }
