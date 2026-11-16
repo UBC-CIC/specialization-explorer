@@ -24,6 +24,21 @@ updates:
       interval: "weekly"
     labels: ["dependencies", "javascript"]
 
+  - package-ecosystem: "npm"
+    directory: "/cdk/layers/aws-jwt-verify"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "javascript"]
+  - package-ecosystem: "npm"
+    directory: "/cdk/layers/postgres"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "javascript"]
+  - package-ecosystem: "npm"
+    directory: "/cdk/layers/node-pg-migrate"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "javascript"]
   - package-ecosystem: "pip"
     directory: "/cdk/lambda/textGeneration"
     schedule:
