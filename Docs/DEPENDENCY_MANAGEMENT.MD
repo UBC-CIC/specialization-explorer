@@ -37,7 +37,7 @@ The `vectorIndexManagerSigV4` function uses a two-file approach:
 ```
 opensearch-py>=3.2.0
 requests-aws4auth>=1.4.0
-boto3>=1.43.123
+boto3>=1.43.126
 ```
 
 ### 3. Locking Process
@@ -66,8 +66,8 @@ The current `requirements.txt` pins the following. Its header says it was genera
 |---|---|---|
 | `opensearch-py` | 3.2.0 | OpenSearch Serverless client |
 | `requests-aws4auth` | 1.4.0 | SigV4 request signing for AOSS |
-| `boto3` | 1.43.123 | AWS SDK |
-| `botocore` | 1.43.123 | AWS SDK core |
+| `boto3` | 1.43.126 | AWS SDK |
+| `botocore` | 1.43.127 | AWS SDK core |
 | `requests` | 2.33.1 | HTTP client (transitive) |
 | `certifi` | 2026.10.18 | TLS certificates (transitive) |
 | `urllib3` | 2.8.0 | HTTP library (transitive) |
