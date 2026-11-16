@@ -127,5 +127,5 @@ stacks.forEach((stack) => {
   });
 });
 
-// Every Lambda log group keeps one month of logs
-applyLambdaLogRetention(stacks, logs.RetentionDays.ONE_MONTH);
+// Every Lambda log group keeps three months of logs, the same as the access, WAF and RDS logs
+applyLambdaLogRetention(stacks, logs.RetentionDays.THREE_MONTHS);

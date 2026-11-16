@@ -88,7 +88,8 @@ exports.handler = async (event) => {
           },
         ],
       },
-      context: { userId: decoded.sub },
+      // Later routes use tokenExp (seconds since epoch) to end the connection when the token expires
+      context: { userId: decoded.sub, tokenExp: decoded.exp },
     };
   } catch (error) {
     console.error("WebSocket connect rejected: invalid token", error?.message);

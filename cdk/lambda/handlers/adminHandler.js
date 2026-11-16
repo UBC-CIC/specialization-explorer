@@ -13,6 +13,7 @@
 const postgres = require("postgres");
 const { getCorsHeaders } = require("./utils/cors.js");
 const { auditLog } = require("./utils/audit.js");
+const { parsePositiveInt } = require("./utils/validation.js");
 const {
   SecretsManagerClient,
   GetSecretValueCommand,
@@ -995,8 +996,8 @@ exports.handler = async (event) => {
           }
 
           const qs = event.queryStringParameters ?? {};
-          const limit = parseInt(qs.limit ?? "50", 10);
-          const offset = parseInt(qs.offset ?? "0", 10);
+          const limit = parsePositiveInt(qs.limit, 50, 100) || 50;
+          const offset = parsePositiveInt(qs.offset, 0, 100000);
 
           // chat_number counts the user's sessions by creation (oldest = 1), matching the
           // "Chat N" fallback label in the student sidebar. The window runs before
@@ -1032,8 +1033,8 @@ exports.handler = async (event) => {
           }
 
           const qs = event.queryStringParameters ?? {};
-          const limit = parseInt(qs.limit ?? "200", 10);
-          const offset = parseInt(qs.offset ?? "0", 10);
+          const limit = parsePositiveInt(qs.limit, 200, 1000) || 200;
+          const offset = parsePositiveInt(qs.offset, 0, 100000);
 
           const rows = await sqlConnection`
              SELECT id, chat_session_id, sender, content, sources, created_at

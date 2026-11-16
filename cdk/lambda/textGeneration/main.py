@@ -157,10 +157,9 @@ def handler(event, context=None):
         apigw_management = None
         
         if connection_id:
-            domain_name = request_context.get('domainName')
-            stage = request_context.get('stage')
-            if domain_name and stage:
-                endpoint_url = f"https://{domain_name}/{stage}"
+            # The endpoint comes from configuration, never from the request
+            endpoint_url = os.environ.get('WEBSOCKET_API_ENDPOINT', '').replace('wss://', 'https://', 1)
+            if endpoint_url:
                 try:
                     apigw_management = boto3.client('apigatewaymanagementapi', endpoint_url=endpoint_url)
                     # Send start message

@@ -266,7 +266,7 @@ exports.handler = async (event) => {
           break;
         }
 
-        if (!EMAIL_REGEX.test(normalizedEmail)) {
+        if (normalizedEmail.length > MAX_EMAIL_LENGTH || !EMAIL_REGEX.test(normalizedEmail)) {
           response.statusCode = 400;
           response.body = JSON.stringify({ error: "Invalid email format" });
           break;
@@ -426,7 +426,7 @@ exports.handler = async (event) => {
         }
 
         const limit = parsePositiveInt(event.queryStringParameters?.limit, 200, 1000) || 200;
-        const offset = parsePositiveInt(event.queryStringParameters?.offset, 0);
+        const offset = parsePositiveInt(event.queryStringParameters?.offset, 0, 100000);
 
         const rows = await sqlConnection`
           SELECT

@@ -14,9 +14,12 @@ The `vectorIndexManagerSigV4` function is the only Lambda deployed as a Docker i
 | `textGeneration`          | `cdk/lambda/textGeneration/`          | Not installed at deploy time: `psycopg2` and Powertools come from Lambda layers, `boto3` from the runtime. `requirements.txt` lists the packages for Dependabot and local use. |
 | `knowledgeBase`, `knowledgeBaseProvisioner` | `cdk/lambda/knowledgeBase/`, `cdk/lambda/knowledgeBaseProvisioner/` | No `requirements.txt`; `boto3` comes from the runtime, and `knowledgeBase` gets `psycopg2` from the `psycopg2.zip` layer |
 
+### Node.js Lambda layers
+The `aws-jwt-verify.zip`, `postgres.zip` and `node-pg-migrate.zip` layers in `cdk/layers/` are committed as built archives. Each has a directory of the same name next to it holding the `package.json` and `package-lock.json` that were used to build it, so the libraries are declared in the repository and visible to Dependabot. After merging a Dependabot update for one of them, rebuild the archive: run `npm ci --omit=dev` in a `nodejs/` directory that contains the updated manifest and lock file, zip that `nodejs/` directory as `<name>.zip`, and replace the file in `cdk/layers/`.
+
 ### Dependabot
 
-`.github/dependabot.yml` opens weekly update pull requests for the `frontend` and `cdk` npm packages (minor and patch updates grouped), `cdk/lambda/ecrImageWaiter`, the pip requirements of `textGeneration` and `vectorIndexManagerSigV4`, and the `vectorIndexManagerSigV4` Docker base image.
+`.github/dependabot.yml` opens weekly update pull requests for the `frontend` and `cdk` npm packages (minor and patch updates grouped), `cdk/lambda/ecrImageWaiter`, the three Node.js layer manifests in `cdk/layers/`, the pip requirements of `textGeneration` and `vectorIndexManagerSigV4`, and the `vectorIndexManagerSigV4` Docker base image.
 
 Dependabot edits `requirements.txt` directly, so after merging its pull requests, regenerate the lock file from `requirements.in` (below) to keep the two consistent.
 
@@ -34,7 +37,7 @@ The `vectorIndexManagerSigV4` function uses a two-file approach:
 ```
 opensearch-py>=3.2.0
 requests-aws4auth>=1.4.0
-boto3>=1.43.123
+boto3>=1.43.126
 ```
 
 ### 3. Locking Process
@@ -63,8 +66,8 @@ The current `requirements.txt` pins the following. Its header says it was genera
 |---|---|---|
 | `opensearch-py` | 3.2.0 | OpenSearch Serverless client |
 | `requests-aws4auth` | 1.4.0 | SigV4 request signing for AOSS |
-| `boto3` | 1.43.123 | AWS SDK |
-| `botocore` | 1.43.123 | AWS SDK core |
+| `boto3` | 1.43.126 | AWS SDK |
+| `botocore` | 1.43.127 | AWS SDK core |
 | `requests` | 2.33.1 | HTTP client (transitive) |
 | `certifi` | 2026.10.18 | TLS certificates (transitive) |
 | `urllib3` | 2.8.0 | HTTP library (transitive) |

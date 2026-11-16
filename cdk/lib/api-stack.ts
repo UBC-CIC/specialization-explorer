@@ -260,6 +260,25 @@ export class ApiGatewayStack extends cdk.Stack {
       authFlows: {
         userSrp: true,
       },
+      // Email identifies the administrator in the API, so a signed-in administrator cannot
+      // change it themselves; every other standard attribute stays writable
+      writeAttributes: new cognito.ClientAttributes().withStandardAttributes({
+        address: true,
+        birthdate: true,
+        familyName: true,
+        fullname: true,
+        gender: true,
+        givenName: true,
+        locale: true,
+        middleName: true,
+        nickname: true,
+        phoneNumber: true,
+        preferredUsername: true,
+        profilePage: true,
+        profilePicture: true,
+        timezone: true,
+        website: true,
+      }),
       // Sign-in and password reset errors do not reveal whether an account exists
       preventUserExistenceErrors: true,
     });
@@ -1789,6 +1808,8 @@ export class ApiGatewayStack extends cdk.Stack {
     // The chat page sends a warm-up every 5 minutes.
     defaultFunction.addEnvironment("MESSAGE_RATE_LIMIT_PER_MINUTE", "10");
     defaultFunction.addEnvironment("WARMUP_RATE_LIMIT_PER_MINUTE", "2");
+    // Counts every frame the route receives, valid or not
+    defaultFunction.addEnvironment("FRAME_RATE_LIMIT_PER_MINUTE", "30");
 
     defaultFunction.addEnvironment('ALLOWED_ORIGIN_PARAM', this.allowedOriginsParamName);
     defaultFunction.addToRolePolicy(new iam.PolicyStatement({

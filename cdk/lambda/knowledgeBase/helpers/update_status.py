@@ -93,6 +93,7 @@ def _update_ingestion_runs(connection, *, ingestion_run_ids: list[str], status: 
                     error_message = %s,
                     completed_at = NOW()
                 WHERE id = ANY(%s::uuid[])
+                  AND status IN ('queued'::ingestion_status, 'running'::ingestion_status)
                 """,
                 (status, error_message, ingestion_run_ids),
             )
@@ -104,6 +105,7 @@ def _update_ingestion_runs(connection, *, ingestion_run_ids: list[str], status: 
                     status = %s::ingestion_status,
                     error_message = %s
                 WHERE id = ANY(%s::uuid[])
+                  AND status IN ('queued'::ingestion_status, 'running'::ingestion_status)
                 """,
                 (status, error_message, ingestion_run_ids),
             )
@@ -601,6 +603,32 @@ def update_status(event, connection):
                 ingestion_run_ids=remaining_run_ids,
                 status=normalized_status,
                 error_message=error_message,
+            )
+
+        # Only queued or running runs are updated, so no rows means every run already reached a
+        # final status. Nothing is advanced a second time; the schedule is only cleaned up.
+        if rows_updated == 0:
+            connection.commit()
+            logger.warning(
+                "No ingestion runs in a queued or running state for sync session %s; not continuing",
+                sync_session_id,
+            )
+            try:
+                _delete_schedule(schedule_name)
+            except Exception as e:
+                logger.error("Failed to delete schedule %s: %s", schedule_name, e, exc_info=True)
+            return _response(
+                event,
+                200,
+                {
+                    "message": "Ingestion runs already reached a final status",
+                    "phase": phase,
+                    "sync_session_id": sync_session_id,
+                    "db_ingestion_run_ids": db_ingestion_run_ids,
+                    "bedrock_ingestion_job_id": bedrock_ingestion_job_id,
+                    "status": normalized_status,
+                    "rows_updated": 0,
+                },
             )
 
         # Retry logic:

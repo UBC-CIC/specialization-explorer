@@ -486,8 +486,8 @@ For guardrail configuration details, see [`Docs/BEDROCK_GUARDRAILS.md`](./BEDROC
 |----------|---------|-----------|
 | **API Access Logs** | Request metadata, status codes, latency | 90 days |
 | **WAF Logs** | Blocked and counted requests, `Authorization` header redacted | 90 days |
-| **Lambda Logs** | Function execution, errors (body excluded), structured audit records | 1 month |
-| **Audit Records** | One JSON line (`"audit": true`) per state-changing, admin or denied request, and per token issuance: actor, action, target IDs, outcome; no message content | 1 month (in the Lambda logs) |
+| **Lambda Logs** | Function execution, errors (body excluded), structured audit records | 90 days |
+| **Audit Records** | One JSON line (`"audit": true`) per state-changing, admin or denied request, and per token issuance: actor, action, target IDs, outcome; no message content | 90 days (in the Lambda logs) |
 | **RDS Logs** | PostgreSQL engine and upgrade logs | 90 days |
 | **VPC Flow Logs** | Network traffic metadata | 90 days in `dev`, 2 years otherwise |
 | **WebSocket Logs** | Connection events, route keys (no query string, which carries the token) | 1 week |

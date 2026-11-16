@@ -17,6 +17,7 @@ from helpers.intervention import assess_response
 import helpers.config as config
 from helpers.message_limits import check_limit, reserve_message
 from helpers.guardrail import invoke_guardrail, ACTION_ANONYMIZED, ACTION_BLOCKED
+from helpers.untrusted import escape_untrusted
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -38,7 +39,7 @@ def _rewrite_query_for_retrieval(
     history_lines = []
     for msg in chat_history[-10:]:
         role = "User" if msg["sender"] == "user" else "Assistant"
-        history_lines.append(f"{role}: {msg['content']}")
+        history_lines.append(f"{role}: {escape_untrusted(msg['content'])}")
     history_block = "\n".join(history_lines) if history_lines else "(no prior conversation)"
 
     rewrite_system_prompt = """
@@ -56,7 +57,7 @@ Output ONLY the search query. Do not include explanations, preambles, or quotes.
 </conversation_history>
 
 <latest_user_message>
-{raw_query}
+{escape_untrusted(raw_query)}
 </latest_user_message>
 """
 

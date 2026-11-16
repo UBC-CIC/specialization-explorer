@@ -35,7 +35,8 @@ DEFAULT_SEMANTIC_CHUNKING = {
 
 def _s3_data_source_configuration(props, bucket_arn):
     """Only objects under this prefix are ingested; uploads land elsewhere until staging promotes them"""
-    prefix = props.get('S3InclusionPrefix') or DEFAULT_S3_INCLUSION_PREFIX
+    # The scope is fixed here; the invocation payload cannot widen it
+    prefix = DEFAULT_S3_INCLUSION_PREFIX
     return {
         'type': 'S3',
         's3Configuration': {

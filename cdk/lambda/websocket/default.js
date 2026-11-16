@@ -7,6 +7,7 @@ const {
 const {
   ApiGatewayManagementApiClient,
   PostToConnectionCommand,
+  DeleteConnectionCommand,
 } = require("@aws-sdk/client-apigatewaymanagementapi");
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -42,6 +43,9 @@ const parseLimit = (value, fallback) => {
 const RATE_WINDOW_SECONDS = 60;
 const MESSAGE_RATE_LIMIT = parseLimit(process.env.MESSAGE_RATE_LIMIT_PER_MINUTE, 10);
 const WARMUP_RATE_LIMIT = parseLimit(process.env.WARMUP_RATE_LIMIT_PER_MINUTE, 2);
+// Every frame counts against this, including malformed ones, so a client cannot exhaust the
+// shared stage throttle by sending frames that never reach the message limit
+const FRAME_RATE_LIMIT = parseLimit(process.env.FRAME_RATE_LIMIT_PER_MINUTE, 30);
 
 const RATE_LIMIT_MESSAGE = "You're sending messages too quickly. Please wait a minute and try again.";
 const UNAVAILABLE_MESSAGE = "Sorry, your message could not be sent. Please try again.";
@@ -95,6 +99,29 @@ const notifyClient = async (connectionId, error, message) => {
   }
 };
 
+// Tells the client a pending message was not sent, then closes the connection
+const closeExpiredConnection = async (event) => {
+  const connectionId = event.requestContext.connectionId;
+  let action;
+  try {
+    action = JSON.parse(event.body)?.action;
+  } catch {
+    action = undefined;
+  }
+  if (action === "generate_text") {
+    await notifyClient(connectionId, "MESSAGE_NOT_SENT", UNAVAILABLE_MESSAGE);
+  }
+  if (!apigw) {
+    console.error("WEBSOCKET_API_ENDPOINT is not set");
+    return;
+  }
+  try {
+    await apigw.send(new DeleteConnectionCommand({ ConnectionId: connectionId }));
+  } catch (error) {
+    console.error("Failed to close expired connection", { connectionId, error: error?.name });
+  }
+};
+
 exports.handler = async (event) => {
   console.log("WebSocket message received:", {
     connectionId: event.requestContext.connectionId,
@@ -105,6 +132,30 @@ exports.handler = async (event) => {
   });
 
   try {
+    const frameUserId = event.requestContext?.authorizer?.userId;
+    if (!validateUUID(frameUserId, "user_id").valid) {
+      return { statusCode: 401, body: JSON.stringify({ error: "Unauthorized" }) };
+    }
+    let frameAllowed;
+    try {
+      frameAllowed = await consumeRateLimit(frameUserId, "frame", FRAME_RATE_LIMIT);
+    } catch (error) {
+      console.error("Frame rate limit check failed", { error: error?.name });
+      return { statusCode: 503, body: JSON.stringify({ error: "Service unavailable" }) };
+    }
+    if (!frameAllowed) {
+      console.warn("Frame rate limit exceeded", { connectionId: event.requestContext.connectionId });
+      return { statusCode: 429, body: JSON.stringify({ error: "Rate limit exceeded" }) };
+    }
+
+    // Authorization is checked once when the socket opens, so the token's expiry is enforced
+    // here. The client reconnects with a fresh token after the connection is closed.
+    const tokenExp = Number(event.requestContext?.authorizer?.tokenExp);
+    if (Number.isFinite(tokenExp) && Date.now() / 1000 >= tokenExp) {
+      await closeExpiredConnection(event);
+      return { statusCode: 401, body: JSON.stringify({ error: "Token expired" }) };
+    }
+
     const body = JSON.parse(event.body);
     const { action, query, chat_session_id, is_intro_message, message_id } = body;
 
