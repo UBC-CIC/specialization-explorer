@@ -89,6 +89,7 @@ const amplifyStack = new AmplifyStack(app, `${StackPrefix}-Amplify`, apiStack, {
   env,
   githubRepo: githubRepo,
   githubBranch: githubBranch,
+  connectionArn: cicdStack.connectionArn,
   knowledgeBaseBucketName: kbStack.knowledgeBaseBucket.bucketName,
   allowedOriginsParamName: apiStack.allowedOriginsParamName,
 });

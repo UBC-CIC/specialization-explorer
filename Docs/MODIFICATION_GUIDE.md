@@ -280,6 +280,6 @@ If your organization requires customer-managed KMS keys (CMKs), see [`Docs/AWS_M
 - **Lambda Timeout**: Increase `timeout` in the CDK function definition.
 - **Memory/Latency**: Increase `memorySize`; check VPC and RDS proxy config.
 - **Database**: Verify `SM_DB_CREDENTIALS` in Secrets Manager and RDS proxy endpoint.
-- **Cognito**: Check the user pool and client IDs in the Amplify app's environment variables (or `frontend/.env.local` when running locally; see `frontend/README.md`).
+- **Cognito**: Check the user pool and client IDs in the environment variables of the `<STACK-PREFIX>-Amplify-FrontendBuild` CodeBuild project (or `frontend/.env.local` when running locally; see `frontend/README.md`).
 - **Guardrails**: See `Docs/BEDROCK_GUARDRAILS.md` for topic policies, allow rules, and testing.
 - **Logging**: CloudWatch logs are the primary debugging source for all Lambdas.

@@ -28,6 +28,8 @@ export class CICDStack extends cdk.Stack {
   public readonly ecrRepositories: { [key: string]: ecr.Repository } = {};
   public readonly buildProjects: { [key: string]: codebuild.IProject } = {};
   public readonly pipelineName: string;
+  /** CodeConnections connection to GitHub, also used by the frontend pipeline */
+  public readonly connectionArn: string;
 
   constructor(scope: Construct, id: string, props: CICDStackProps) {
     super(scope, id, props);
@@ -99,6 +101,8 @@ export class CICDStack extends cdk.Stack {
         providerType: "GitHub",
       }
     );
+
+    this.connectionArn = githubConnection.attrConnectionArn;
 
     // Output the connection ARN for reference
     new cdk.CfnOutput(this, "GitHubConnectionArn", {

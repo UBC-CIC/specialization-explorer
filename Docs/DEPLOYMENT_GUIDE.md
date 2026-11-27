@@ -6,14 +6,12 @@
 - [Table of Contents](#table-of-contents)
 - [Requirements](#requirements)
   - [Request Higher Bedrock LLM Invocation Quotas](#request-higher-bedrock-llm-invocation-quotas)
-- [Pre-Deployment](#pre-deployment)
-  - [Create GitHub Personal Access Token](#create-github-personal-access-token)
 - [Deployment](#deployment)
   - [Step 1: Fork \& Clone The Repository](#step-1-fork--clone-the-repository)
   - [Step 2: Upload Secrets \& Parameters](#step-2-upload-secrets--parameters)
   - [Step 3: CDK Deployment](#step-3-cdk-deployment)
 - [Post-Deployment](#post-deployment)
-  - [Step 1: Build AWS Amplify App](#step-1-build-aws-amplify-app)
+  - [Step 1: Publish the Frontend](#step-1-publish-the-frontend)
   - [Step 2: Configure Admin User](#step-2-configure-admin-user)
   - [Step 3: Visit Web App](#step-3-visit-web-app)
   - [Step 4: Add Data to the Knowledge Base](#step-4-add-data-to-the-knowledge-base)
@@ -54,16 +52,6 @@ To request quota increases:
 5. Submit the quota increase request and wait for AWS approval (this can take 24-48 hours)
 
 _Note: Consider your expected concurrent users and document processing volume when requesting quota increases. Higher quotas ensure smoother operations without throttling._
-
-## Pre-Deployment
-
-### Create GitHub Personal Access Token
-
-To deploy this solution, you will need to generate a GitHub personal access token. Please visit [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token) for detailed instruction to create a personal access token.
-
-_Note: Make sure to give access to only the SpecEx repository. Enable Read-only for Contents, and Metadata. For webhooks and Commit statuses enable read and write permissions._
-
-**Once you create a token, please note down its value as you will use it later in the deployment process.**
 
 ## Deployment
 
@@ -116,46 +104,6 @@ npm install
 ```
 
 ### Step 2: Upload Secrets & Parameters
-
-You would have to supply your GitHub personal access token you created earlier when deploying the solution. Run the following command and ensure you replace `<YOUR-GITHUB-TOKEN>` and `<YOUR-PROFILE-NAME>` with your actual GitHub token and the appropriate AWS profile name.
-
-<details>
-<summary>macOS/Linux</summary>
-
-```bash
-aws secretsmanager create-secret \
-  --name github-personal-access-token \
-  --secret-string '{"my-github-token": "<YOUR-GITHUB-TOKEN>"}' \
-  --profile <YOUR-PROFILE-NAME>
-```
-
-</details>
-
-<details>
-<summary>Windows CMD</summary>
-
-```cmd
-aws secretsmanager create-secret ^
-  --name github-personal-access-token ^
-  --secret-string "{\"my-github-token\": \"<YOUR-GITHUB-TOKEN>\"}" ^
-  --profile <YOUR-PROFILE-NAME>
-```
-
-</details>
-
-<details>
-<summary>PowerShell</summary>
-
-```powershell
-aws secretsmanager create-secret `
-  --name github-personal-access-token `
-  --secret-string '{\"my-github-token\": \"<YOUR-GITHUB-TOKEN>\"}' `
-  --profile <YOUR-PROFILE-NAME>
-```
-
-</details>
-
-&nbsp;
 
 You will need to upload your GitHub username to Amazon SSM Parameter Store. Replace `<YOUR-GITHUB-USERNAME>` and `<YOUR-PROFILE-NAME>` accordingly.
 
@@ -499,7 +447,7 @@ npx cdk bootstrap \
 
 You may run the following command to deploy the stacks all at once. Again, replace `<YOUR-PROFILE-NAME>` with the appropriate AWS profile used earlier. Also replace `<YOUR-STACK-PREFIX>` with the appropriate stack prefix.
 
-The stack prefix will be prefixed onto the physical names of the resources created during deployment. The `environment` parameter specifies the deployment environment (dev, test, prod) and is applied as a tag; in `dev` the VPC flow logs keep 90 days. The `githubRepo` parameter should match your forked repository name. The optional `githubBranch` parameter (default `main`) selects the branch CodePipeline builds from and adds that branch to the Amplify app.
+The stack prefix will be prefixed onto the physical names of the resources created during deployment. The `environment` parameter specifies the deployment environment (dev, test, prod) and is applied as a tag; in `dev` the VPC flow logs keep 90 days. The `githubRepo` parameter should match your forked repository name. The optional `githubBranch` parameter (default `main`) selects the branch both pipelines build from and names the Amplify branch the frontend is published to.
 
 ```bash
 npx cdk deploy --all \
@@ -533,12 +481,12 @@ The CDK deployment creates the following stacks in dependency order:
 | `<PREFIX>-CICD` | CodePipeline and ECR repositories for Docker image builds |
 | `<PREFIX>-KnowledgeBase` | Amazon Bedrock Knowledge Base, OpenSearch Serverless collection, and S3 data source bucket |
 | `<PREFIX>-Api` | API Gateway (REST + WebSocket), WAF, Bedrock guardrail, the application Lambda functions, and Cognito User Pool |
-| `<PREFIX>-Amplify` | AWS Amplify app connected to your GitHub repository |
+| `<PREFIX>-Amplify` | AWS Amplify app (manual deployments, no repository connection) and the CodePipeline that builds the frontend and publishes it to that app |
 | `<PREFIX>-Backup` | AWS Backup vault and daily plan (35-day retention) for the database and the knowledge base bucket |
 
 ### Authorize the GitHub Connection (Required After First Deploy)
 
-The CICD stack creates a GitHub connection via AWS CodeConnections to allow CodePipeline to pull source code. This connection must be **manually authorized** in the AWS Console before the pipeline can run — it will remain in a `PENDING` state until you do this.
+The CICD stack creates a GitHub connection via AWS CodeConnections to allow CodePipeline to pull source code. Both pipelines use it: the Docker image pipeline in the CICD stack and the frontend pipeline in the Amplify stack. No GitHub personal access token is used anywhere. This connection must be **manually authorized** in the AWS Console before the pipeline can run — it will remain in a `PENDING` state until you do this.
 
 1. After CDK deployment completes, go to **AWS Console → Developer Tools → Settings → Connections** (or search "CodeConnections").
 2. Find the connection named `<STACK-PREFIX>-CICD-github-conn` with status `Pending`.
@@ -599,24 +547,20 @@ This means in most cases you do not need to manually trigger the pipeline — it
 
 ## Post-Deployment
 
-### Step 1: Build AWS Amplify App
+### Step 1: Publish the Frontend
 
-1. Log in to AWS console, and navigate to **AWS Amplify**. You can do so by typing `Amplify` in the search bar at the top.
-2. From `All apps`, click `<STACK-PREFIX>-amplify`.
-3. You will see the `main` branch, plus the branch you passed as `githubBranch` if it is not `main`. Click the branch you deployed (`main` by default). The API and S3 CORS settings allow only `https://<githubBranch>.<app-id>.amplifyapp.com`, so use that branch's URL.
-4. Click `Redeploy this version` to trigger a build
-5. Wait for the build to complete (this may take 5-10 minutes)
-6. You now have access to the `Amplify App ID` and the public domain name to use the web app.
+The Amplify app is a manually deployed app: it is not connected to GitHub. The `<STACK-PREFIX>-Amplify-FrontendPipeline` pipeline pulls the repository through the CodeConnections connection, runs `npm ci` and `npm run build` in `frontend/` with the API and Cognito values from the Api stack, and publishes `dist/` to the Amplify branch. It runs once when the stack is created, and again on every push to `githubBranch` that changes files under `frontend/`.
+
+1. Go to **AWS Console → CodePipeline** and open `<STACK-PREFIX>-Amplify-FrontendPipeline`.
+2. If the first run failed because the GitHub connection was not authorized yet, authorize it (see [Authorize the GitHub Connection](#authorize-the-github-connection-required-after-first-deploy)) and click **Release change**.
+3. Wait for the `Deploy` stage to finish (about 5 minutes). The build log is in CodeBuild under `<STACK-PREFIX>-Amplify-FrontendBuild`.
+4. The web app URL is the `AmplifyUrl` output of the `<STACK-PREFIX>-Amplify` stack, `https://<githubBranch>.<app-id>.amplifyapp.com`. The API and S3 CORS settings allow only this URL.
 
 > [!NOTE]
-> If the build fails with the following IAM role error:
->
-> `Unable to assume specified IAM Role. Please ensure the selected IAM Role has sufficient permissions and the Trust Relationship is configured correctly.`
->
-> 1. In the Amplify app, go to **App settings**.
-> 2. Click **Branch settings**.
-> 3. Click **Reconnect repository** and complete the GitHub authorization.
-> 4. Return to the branch and click `Redeploy this version` again.
+> The build reads the API and Cognito values when it runs. If a CDK deployment changes them (for example a new API endpoint), click **Release change** on the frontend pipeline so the site is rebuilt with the new values.
+
+> [!NOTE]
+> **Moving from the token-based Amplify app.** Earlier versions connected the Amplify app to GitHub with a personal access token. An app connected to a repository cannot become a manually deployed one, so the first deployment of this version creates a new Amplify app and CloudFormation deletes the old one. The site URL changes to the new app's `amplifyapp.com` address, and the stack points the API and S3 CORS settings at it. After the deployment you can delete the `github-personal-access-token` secret in Secrets Manager and revoke the token on GitHub.
 
 ### Step 2: Configure Admin User
 
@@ -645,7 +589,7 @@ After the first sign-in, the mode dropdown appears in the top right of the heade
 
 ### Step 3: Visit Web App
 
-You can now navigate to the web app URL (found in the Amplify console) to see your application in action.
+You can now navigate to the web app URL (the `AmplifyUrl` stack output, also shown in the Amplify console) to see your application in action.
 
 **Default URL format:** `https://main.<app-id>.amplifyapp.com` (or `https://<githubBranch>.<app-id>.amplifyapp.com` if you deployed another branch)
 
@@ -729,12 +673,12 @@ _Note: Always read the current value first and append your new origin to avoid r
 - Symptoms: CloudFormation throws a validation error during the change set or deployment phase, related to a `ResourceExistenceCheck` for an ARN that appears to reference the `DataPipeline` or `CICD` resources.
 - Solution: This commonly occurs on first-time deployments when the pipeline and ECR resources are created by the deployment but are referenced in IAM policy statements before they exist. Authorize the GitHub connection and follow the [CodePipeline & ECR Image Bootstrapping](#codepipeline--ecr-image-bootstrapping-first-time-deployment) steps to manually trigger the pipeline build and redeploy.
 
-**Issue: Amplify build fails**
+**Issue: Frontend pipeline fails**
 
-- Solution: Check the build logs in Amplify console. Common causes:
-  - Missing environment variables
-  - Node version mismatch
-  - Dependency installation failures
+- Solution: Open `<STACK-PREFIX>-Amplify-FrontendPipeline` in CodePipeline and check which stage failed.
+  - `Source` fails: the GitHub connection is not authorized, or `specEx-owner-name` does not match the repository owner.
+  - `Deploy` fails during `npm ci` or `npm run build`: check the `<STACK-PREFIX>-Amplify-FrontendBuild` log in CodeBuild for dependency or TypeScript errors.
+  - `Deploy` fails after the build: the log shows the Amplify deployment job ID and status; open the job in the Amplify console for details.
 
 **Issue: Database connection errors**
 
@@ -799,7 +743,6 @@ To take down the deployed stack for a fresh redeployment in the future, follow t
 4. **Delete Secrets:**
    - Navigate to AWS Secrets Manager
    - Delete the following secrets:
-     - `github-personal-access-token`
      - `SpecExSecrets`
      - `<STACK-PREFIX>/KnowledgeBase/Id` (created by a custom resource, so stack deletion leaves it)
      - Any database credentials created by the stack

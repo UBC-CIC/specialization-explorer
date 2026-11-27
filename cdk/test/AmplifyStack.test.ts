@@ -1,5 +1,5 @@
 import * as cdk from "aws-cdk-lib";
-import { Template } from "aws-cdk-lib/assertions";
+import { Match, Template } from "aws-cdk-lib/assertions";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
@@ -12,6 +12,7 @@ import { AmplifyStack } from "../lib/amplify-stack";
 const env = { account: "123456789012", region: "ca-central-1" };
 
 let headers: Record<string, string>;
+let template: Template;
 
 beforeAll(() => {
   // Asset bundling is not needed to inspect the Amplify app, so code comes from parameters
@@ -32,11 +33,13 @@ beforeAll(() => {
   const amplifyStack = new AmplifyStack(app, "test-Amplify", apiStack, {
     env,
     githubRepo: "repo",
+    connectionArn: "arn:aws:codeconnections:ca-central-1:123456789012:connection/test",
     knowledgeBaseBucketName: "bucket",
     allowedOriginsParamName: apiStack.allowedOriginsParamName,
   });
 
-  const amplifyApp = Object.values(Template.fromStack(amplifyStack).toJSON().Resources).find(
+  template = Template.fromStack(amplifyStack);
+  const amplifyApp = Object.values(template.toJSON().Resources).find(
     (r: any) => r.Type === "AWS::Amplify::App"
   ) as { Properties: { CustomHeaders: string } };
   // The header values contain tokens, which Fn::Join renders as a list of parts
@@ -46,7 +49,7 @@ beforeAll(() => {
     : JSON.parse(customHeaders)["Fn::Join"][1].map((p: unknown) => (typeof p === "string" ? p : "TOKEN")).join("");
   const parsed = yaml.parse(rendered);
   headers = Object.fromEntries(
-    parsed.applications[0].customHeaders[0].headers.map(
+    parsed.customHeaders[0].headers.map(
       (h: { key: string; value: string }) => [h.key, h.value]
     )
   );
@@ -65,5 +68,49 @@ describe("Amplify response headers", () => {
     expect(headers["Permissions-Policy"]).toBe(
       "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
     );
+  });
+});
+
+describe("Amplify app source", () => {
+  test("is a manually deployed app with no repository or token", () => {
+    const apps = template.findResources("AWS::Amplify::App");
+    for (const appResource of Object.values(apps)) {
+      expect(appResource.Properties.Repository).toBeUndefined();
+      expect(appResource.Properties.OauthToken).toBeUndefined();
+      expect(appResource.Properties.AccessToken).toBeUndefined();
+    }
+  });
+
+  test("pulls the repository through the CodeConnections connection", () => {
+    template.hasResourceProperties("AWS::CodePipeline::Pipeline", {
+      PipelineType: "V2",
+      Stages: Match.arrayWith([
+        Match.objectLike({
+          Name: "Source",
+          Actions: [
+            Match.objectLike({
+              ActionTypeId: Match.objectLike({ Provider: "CodeStarSourceConnection" }),
+              Configuration: Match.objectLike({
+                ConnectionArn: "arn:aws:codeconnections:ca-central-1:123456789012:connection/test",
+              }),
+            }),
+          ],
+        }),
+      ]),
+    });
+  });
+
+  test("lets the build publish only to its own Amplify branch", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const amplifyStatements = Object.values(policies)
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+      .filter((s: any) => [s.Action].flat().some((a: string) => a.startsWith("amplify:")));
+    expect(amplifyStatements).toHaveLength(1);
+    expect(amplifyStatements[0].Action).toEqual([
+      "amplify:CreateDeployment",
+      "amplify:StartDeployment",
+      "amplify:GetJob",
+    ]);
+    expect(JSON.stringify(amplifyStatements[0].Resource)).not.toContain('"*"');
   });
 });
