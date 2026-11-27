@@ -64,7 +64,7 @@ Each student can send a limited number of messages per day (set by administrator
 
 ## Administrator View
 
-Administrators log in via Cognito with their email, password and a code from an authenticator app (MFA is required), and access the admin dashboard from the header. The sidebar provides navigation between four sections: Dashboard & Management, Analytics, System Settings, and Chat History.
+Administrators log in via Cognito with their email and password (MFA is currently off), and access the admin dashboard from the header. The sidebar provides navigation between four sections: Dashboard & Management, Analytics, System Settings, and Chat History.
 
 If the administrator has just been given access, they will not have the mode dropdown option on the top right. They will manually have to add `/admin/login` to the end of the URL to login for the first time, and set up the authenticator app at that first sign-in. After this, they will be able to see the mode dropdown option and will seamlessly be able to switch between the student and administrator view.
 

@@ -6,7 +6,7 @@
 
 1. The frontend is served by Amplify Hosting through Amazon CloudFront, which AWS Shield Standard protects automatically. Requests to the REST API pass through AWS WAF (managed rule sets and per-IP rate limits). WAF cannot be attached to the WebSocket API, so its messages are rate limited per user in the default route handler.
 
-2. Users access the application through a React frontend hosted on AWS Amplify. AWS Cognito handles user authentication for admins (with required TOTP MFA), ensuring that only authorized administrators are able to access admin analytics and features. Students do not sign in, so they stay anonymous: the browser keeps a random user ID and user key and exchanges them for a 15-minute token bound to that user.
+2. Users access the application through a React frontend hosted on AWS Amplify. AWS Cognito handles user authentication for admins (MFA is currently off), ensuring that only authorized administrators are able to access admin analytics and features. Students do not sign in, so they stay anonymous: the browser keeps a random user ID and user key and exchanges them for a 15-minute token bound to that user.
 
 3. The frontend communicates with backend services via REST API (API Gateway → Lambda) for CRUD operations. Access is controlled using IAM roles and policies to ensure secure access to the services required to retain functionality. The WebSocket endpoint is used to stream live responses generated from the LLM to the user's frontend.
 

@@ -51,7 +51,7 @@ For component-specific overrides, search for hex codes or Tailwind classes direc
 
 The project uses a dual access model:
 
-- **Admin users**: Authenticated via Cognito (SRP, required TOTP MFA, `admin` group). Admin-only APIs require a Cognito ID token and are restricted by the admin authorizer in `cdk/OpenAPI_Swagger_Definition.yaml` and `cdk/lib/api-stack.ts`.
+- **Admin users**: Authenticated via Cognito (SRP, MFA currently off, `admin` group). Admin-only APIs require a Cognito ID token and are restricted by the admin authorizer in `cdk/OpenAPI_Swagger_Definition.yaml` and `cdk/lib/api-stack.ts`.
 - **Public users**: `POST /user` creates an anonymous user and returns a random user key. `cdk/lambda/publicTokenFunction/publicTokenFunction.js` exchanges the key for a 15-minute JWT bound to that user. The frontend stores the user ID and key in `localStorage` and rotates the key daily (`frontend/src/providers/UserContext.tsx`), and fetches tokens in `frontend/src/lib/userToken.ts`. See section 3.5 of the [Security Overview](./SECURITY_OVERVIEW.md) for the accepted risk.
 
 Key files:
