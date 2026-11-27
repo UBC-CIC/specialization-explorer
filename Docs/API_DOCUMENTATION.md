@@ -22,7 +22,7 @@ This document provides comprehensive documentation for the Specialization Explor
 The API has two kinds of callers, each with its own token in the `Authorization` header:
 
 - **Students** are anonymous. They use a short-lived HS256 token from `GET /user/publicToken`, sent as `Authorization: Bearer <token>`.
-- **Administrators** sign in with AWS Cognito (SRP and TOTP MFA) and send their Cognito ID token as `Authorization: <id-token>`.
+- **Administrators** sign in with AWS Cognito (SRP; MFA is currently off) and send their Cognito ID token as `Authorization: <id-token>`.
 
 ---
 

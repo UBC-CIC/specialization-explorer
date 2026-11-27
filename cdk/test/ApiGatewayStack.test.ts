@@ -159,10 +159,9 @@ describe("Lambda execution roles", () => {
 });
 
 describe("Cognito user pool", () => {
-  test("requires TOTP MFA, keeps deletion protection and turns on threat protection", () => {
+  test("has MFA off, keeps deletion protection and turns on threat protection", () => {
     template.hasResourceProperties("AWS::Cognito::UserPool", {
-      MfaConfiguration: "ON",
-      EnabledMfas: ["SOFTWARE_TOKEN_MFA"],
+      MfaConfiguration: "OFF",
       DeletionProtection: "ACTIVE",
       UserPoolTier: "PLUS",
       UserPoolAddOns: { AdvancedSecurityMode: "ENFORCED" },

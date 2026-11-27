@@ -579,9 +579,9 @@ To create an admin user for accessing the admin dashboard:
 8. After creation, select the user and click "Add user to group"
 9. Select the "admin" group
 10. Open the web app and add `/admin/login` to the end of the URL, then sign in with the email and temporary password. You'll be prompted to set a new password on first login. After sign-in the app calls `POST /admin/promote_user`, which records the account in the database with the `admin` role.
-11. Set up an authenticator app (for example Microsoft Authenticator, Google Authenticator or 1Password). The login page shows a setup key, and a link that opens the app on a phone. Enter the 6-digit code from the app to finish signing in.
+11. MFA is currently turned off, so no authenticator app is needed.
 
-MFA is required: every later sign-in asks for a code from the authenticator app. If an administrator loses their authenticator app, an AWS administrator can reset it by running `aws cognito-idp admin-set-user-mfa-preference --user-pool-id <POOL-ID> --username <EMAIL> --software-token-mfa-settings Enabled=false,PreferredMfa=false`; the administrator then enrolls a new app at their next sign-in.
+MFA is currently off: administrators sign in with their email and password only. To require an authenticator app (TOTP) code again, set `mfa` back to `cognito.Mfa.REQUIRED` with `mfaSecondFactor: { otp: true, sms: false }` in `cdk/lib/api-stack.ts` and redeploy; administrators then enroll an app at their next sign-in. With MFA required, if an administrator loses their authenticator app, an AWS administrator can reset it by running `aws cognito-idp admin-set-user-mfa-preference --user-pool-id <POOL-ID> --username <EMAIL> --software-token-mfa-settings Enabled=false,PreferredMfa=false`; the administrator then enrolls a new app at their next sign-in.
 
 The user pool uses the Cognito Plus feature plan for threat protection in full-function mode. Sign-ins with passwords found in known credential leaks are blocked, and high-risk sign-ins are blocked. The admin login uses SRP, so the password is not sent to Cognito. The Plus plan is billed per monthly active user; see [Amazon Cognito pricing](https://aws.amazon.com/cognito/pricing/).
 

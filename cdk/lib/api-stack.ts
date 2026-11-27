@@ -146,10 +146,11 @@ export class ApiGatewayStack extends cdk.Stack {
         email: true,
       },
       selfSignUpEnabled: false,
-      // Every account in this pool is an administrator, so each sign-in needs an
-      // authenticator app code; administrators enroll on their first sign-in
-      mfa: cognito.Mfa.REQUIRED,
-      mfaSecondFactor: { otp: true, sms: false },
+      // MFA is turned off for now, so administrators sign in with a password only.
+      // To require an authenticator app (TOTP) code again, set mfa to cognito.Mfa.REQUIRED
+      // and mfaSecondFactor to { otp: true, sms: false }; the admin login already handles
+      // the TOTP setup and code steps.
+      mfa: cognito.Mfa.OFF,
       // Threat protection (Plus plan) blocks sign-ins with compromised passwords and
       // acts on risky sign-ins; the actions are set in the risk configuration below
       // https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pool-settings-threat-protection.html
@@ -294,8 +295,10 @@ export class ApiGatewayStack extends cdk.Stack {
       },
       accountTakeoverRiskConfiguration: {
         actions: {
-          lowAction: { eventAction: "MFA_IF_CONFIGURED", notify: false },
-          mediumAction: { eventAction: "MFA_REQUIRED", notify: false },
+          // MFA is off for now, so low and medium risk sign-ins are not challenged for a code.
+          // With MFA back on, use MFA_IF_CONFIGURED for low and MFA_REQUIRED for medium.
+          lowAction: { eventAction: "NO_ACTION", notify: false },
+          mediumAction: { eventAction: "NO_ACTION", notify: false },
           highAction: { eventAction: "BLOCK", notify: false },
         },
       },

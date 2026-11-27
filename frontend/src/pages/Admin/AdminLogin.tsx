@@ -19,8 +19,9 @@ import Footer from "@/components/Footer";
 // Name shown for this account in the administrator's authenticator app
 const TOTP_ISSUER = "Specialization Explorer";
 
-// The pool requires an authenticator app (TOTP) code on every sign-in. A new administrator sets a
-// password, then enrolls an app, then enters a code; later sign-ins go straight to the code.
+// MFA is currently off in the user pool, so sign-in finishes after the password steps. When the
+// pool requires an authenticator app (TOTP) code, a new administrator sets a password, then
+// enrolls an app, then enters a code; later sign-ins go straight to the code.
 // https://docs.amplify.aws/react/build-a-backend/auth/concepts/multi-factor-authentication/
 type Step = "credentials" | "newPassword" | "totpSetup" | "totpCode";
 
