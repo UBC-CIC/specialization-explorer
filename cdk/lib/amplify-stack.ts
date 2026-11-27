@@ -1,23 +1,37 @@
-import {
-  App,
-  GitHubSourceCodeProvider,
-  RedirectStatus,
-} from "@aws-cdk/aws-amplify-alpha";
+import { App, RedirectStatus } from "@aws-cdk/aws-amplify-alpha";
 import * as cdk from "aws-cdk-lib";
-import { BuildSpec } from "aws-cdk-lib/aws-codebuild";
+import * as codebuild from "aws-cdk-lib/aws-codebuild";
+import * as codepipeline from "aws-cdk-lib/aws-codepipeline";
+import * as codepipeline_actions from "aws-cdk-lib/aws-codepipeline-actions";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as logs from "aws-cdk-lib/aws-logs";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
-import * as yaml from "yaml";
 import { ApiGatewayStack } from "./api-stack";
 
 interface AmplifyStackProps extends cdk.StackProps {
   githubRepo: string;
   githubBranch?: string;
+  /** CodeConnections connection to GitHub, created by the CICD stack */
+  connectionArn: string;
   knowledgeBaseBucketName: string;
   allowedOriginsParamName: string;
 }
 
+/**
+ * Hosts the frontend on Amplify Hosting as a manually deployed app (not connected to a Git
+ * repository), so Amplify needs no GitHub personal access token.
+ *
+ * A CodePipeline pulls the repository through the CodeConnections connection, builds
+ * `frontend/` with the API and Cognito values from the API stack and publishes `dist/` to the
+ * Amplify branch with CreateDeployment and StartDeployment. It runs once when it is created
+ * and then on every push to the branch that changes `frontend/`.
+ *
+ * https://docs.aws.amazon.com/amplify/latest/userguide/manual-deploys.html
+ */
 export class AmplifyStack extends cdk.Stack {
+  public readonly pipelineName: string;
+
   constructor(
     scope: Construct,
     id: string,
@@ -26,64 +40,14 @@ export class AmplifyStack extends cdk.Stack {
   ) {
     super(scope, id, props);
 
-    const githubRepoName = props.githubRepo;
+    const branch = props.githubBranch ?? "main";
 
-    const amplifyYaml = yaml.parse(`
-      version: 1
-      applications:
-        - appRoot: frontend
-          frontend:
-            phases:
-              preBuild:
-                commands:
-                  - pwd
-                  - npm ci
-              build:
-                commands:
-                  - npm run build
-            artifacts:
-              baseDirectory: dist
-              files:
-                - '**/*'
-            cache:
-              paths:
-                - 'node_modules/**/*'
-            redirects:
-              - source: </^[^.]+$|.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|woff2|ttf|map|json|webp)$)([^.]+$)/>
-                target: /
-                status: 404
-    `);
-
-    const username = cdk.aws_ssm.StringParameter.valueForStringParameter(
-      this,
-      "specEx-owner-name"
-    );
-
-    const amplifyApp = new App(this, `${id}-amplifyApp`, {
+    // A new construct ID gives a new app: an app created from a repository cannot be turned
+    // into a manually deployed one, so the old repository-connected app is replaced
+    const amplifyApp = new App(this, `${id}-manualDeployApp`, {
       appName: `${id}-amplify`,
-      sourceCodeProvider: new GitHubSourceCodeProvider({
-        owner: username,
-        repository: githubRepoName,
-        oauthToken: cdk.SecretValue.secretsManager(
-          "github-personal-access-token",
-          {
-            jsonField: "my-github-token",
-          }
-        ),
-      }),
-      environmentVariables: {
-        VITE_AWS_REGION: this.region,
-        VITE_COGNITO_USER_POOL_ID: apiStack.getUserPoolId(),
-        VITE_COGNITO_USER_POOL_CLIENT_ID: apiStack.getUserPoolClientId(),
-        VITE_API_ENDPOINT: apiStack.getEndpointUrl(),
-        VITE_IDENTITY_POOL_ID: apiStack.getIdentityPoolId(),
-        VITE_WEBSOCKET_URL: `${apiStack.getWebSocketUrl()}/${apiStack.getStageName() ?? ""
-          }`,
-      },
-      buildSpec: BuildSpec.fromObjectToYaml(amplifyYaml),
       customResponseHeaders: [
         {
-          appRoot: "frontend",
           pattern: "**/*",
           headers: {
             "Content-Security-Policy": [
@@ -111,24 +75,160 @@ export class AmplifyStack extends cdk.Stack {
       ],
     });
 
+    // Client-side routes (paths without a file extension) get the app shell with a 200
+    // https://docs.aws.amazon.com/amplify/latest/userguide/redirect-rewrite-examples.html#redirects-for-single-page-web-apps-spa
     amplifyApp.addCustomRule({
-      source: "/<*>",
-      target: "\t/index.html",
-      status: RedirectStatus.NOT_FOUND_REWRITE,
+      source: "</^[^.]+$|\\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|woff2|ttf|map|json|webp)$)([^.]+$)/>",
+      target: "/index.html",
+      status: RedirectStatus.REWRITE,
     });
 
-    // Add main branch
-    amplifyApp.addBranch("main");
+    const amplifyBranch = amplifyApp.addBranch(branch);
 
-    // Add feature branch if specified and not main
-    const branch = props.githubBranch ?? "main";
-    if (branch !== "main") {
-      amplifyApp.addBranch(branch);
-    }
+    // -- FRONTEND PIPELINE --
+    this.pipelineName = `${id}-FrontendPipeline`;
+
+    const buildLogGroup = new logs.LogGroup(this, "FrontendBuildLogs", {
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const buildProject = new codebuild.PipelineProject(this, "FrontendBuild", {
+      projectName: `${id}-FrontendBuild`,
+      environment: {
+        buildImage: codebuild.LinuxArmBuildImage.AMAZON_LINUX_2023_STANDARD_4_0,
+        computeType: codebuild.ComputeType.SMALL,
+      },
+      logging: { cloudWatch: { logGroup: buildLogGroup } },
+      // Public client configuration that ends up in the browser bundle
+      environmentVariables: {
+        VITE_AWS_REGION: { value: this.region },
+        VITE_COGNITO_USER_POOL_ID: { value: apiStack.getUserPoolId() },
+        VITE_COGNITO_USER_POOL_CLIENT_ID: { value: apiStack.getUserPoolClientId() },
+        VITE_API_ENDPOINT: { value: apiStack.getEndpointUrl() },
+        VITE_IDENTITY_POOL_ID: { value: apiStack.getIdentityPoolId() },
+        VITE_WEBSOCKET_URL: {
+          value: `${apiStack.getWebSocketUrl()}/${apiStack.getStageName()}`,
+        },
+        AMPLIFY_APP_ID: { value: amplifyApp.appId },
+        AMPLIFY_BRANCH: { value: amplifyBranch.branchName },
+      },
+      buildSpec: codebuild.BuildSpec.fromObject({
+        version: "0.2",
+        phases: {
+          install: {
+            "runtime-versions": { nodejs: 24 },
+          },
+          pre_build: {
+            commands: ["cd frontend", "npm ci"],
+          },
+          build: {
+            commands: ["npm run build"],
+          },
+          post_build: {
+            commands: [
+              // post_build also runs after a failed build; there is nothing to publish then
+              'test "$CODEBUILD_BUILD_SUCCEEDING" = "1"',
+              "(cd dist && zip -qr ../site.zip .)",
+              // Amplify returns a presigned URL for the zip and a job that publishes it
+              `bash -c '
+                set -euo pipefail
+                read -r JOB_ID UPLOAD_URL < <(aws amplify create-deployment --app-id "$AMPLIFY_APP_ID" --branch-name "$AMPLIFY_BRANCH" --query "[jobId,zipUploadUrl]" --output text)
+                curl --fail --silent --show-error -X PUT -H "Content-Type: application/zip" --upload-file site.zip "$UPLOAD_URL"
+                aws amplify start-deployment --app-id "$AMPLIFY_APP_ID" --branch-name "$AMPLIFY_BRANCH" --job-id "$JOB_ID" > /dev/null
+                echo "Started Amplify deployment job $JOB_ID"
+                for _ in $(seq 1 60); do
+                  STATUS=$(aws amplify get-job --app-id "$AMPLIFY_APP_ID" --branch-name "$AMPLIFY_BRANCH" --job-id "$JOB_ID" --query job.summary.status --output text)
+                  case "$STATUS" in
+                    SUCCEED) echo "Deployment $JOB_ID succeeded"; exit 0 ;;
+                    FAILED|CANCELLED) echo "Deployment $JOB_ID ended with status $STATUS"; exit 1 ;;
+                  esac
+                  sleep 10
+                done
+                echo "Deployment $JOB_ID did not finish within 10 minutes"
+                exit 1
+              '`,
+            ],
+          },
+        },
+      }),
+    });
+
+    buildProject.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["amplify:CreateDeployment", "amplify:StartDeployment", "amplify:GetJob"],
+        // CreateDeployment is authorized against the branch's deployments path
+        resources: [
+          amplifyBranch.arn,
+          `${amplifyBranch.arn}/deployments/*`,
+          `${amplifyBranch.arn}/jobs/*`,
+        ],
+      })
+    );
+
+    const artifactBucket = new s3.Bucket(this, "PipelineArtifacts", {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      lifecycleRules: [{ expiration: cdk.Duration.days(30) }],
+    });
+
+    const owner = cdk.aws_ssm.StringParameter.valueForStringParameter(
+      this,
+      "specEx-owner-name"
+    );
+    const sourceOutput = new codepipeline.Artifact();
+    const sourceAction = new codepipeline_actions.CodeStarConnectionsSourceAction({
+      actionName: "GitHub",
+      owner,
+      repo: props.githubRepo,
+      branch,
+      connectionArn: props.connectionArn,
+      output: sourceOutput,
+    });
+
+    new codepipeline.Pipeline(this, "FrontendPipeline", {
+      pipelineName: this.pipelineName,
+      pipelineType: codepipeline.PipelineType.V2,
+      artifactBucket,
+      stages: [
+        { stageName: "Source", actions: [sourceAction] },
+        {
+          stageName: "Deploy",
+          actions: [
+            new codepipeline_actions.CodeBuildAction({
+              actionName: "BuildAndPublish",
+              project: buildProject,
+              input: sourceOutput,
+            }),
+          ],
+        },
+      ],
+      // Only pushes that change the frontend rebuild the site
+      triggers: [
+        {
+          providerType: codepipeline.ProviderType.CODE_STAR_SOURCE_CONNECTION,
+          gitConfiguration: {
+            sourceAction,
+            pushFilter: [{ branchesIncludes: [branch], filePathsIncludes: ["frontend/**"] }],
+          },
+        },
+      ],
+    });
 
     // -- UPDATE THE SSM PARAMETER TO POINT TO THE AMPLIFY APP URL --
     const amplifyUrl = `https://${branch}.${amplifyApp.appId}.amplifyapp.com`;
 
+    new cdk.CfnOutput(this, "AmplifyUrl", {
+      value: amplifyUrl,
+      description: "URL of the web app",
+    });
+    new cdk.CfnOutput(this, "FrontendPipelineName", {
+      value: this.pipelineName,
+      description: "Pipeline that builds the frontend and publishes it to Amplify",
+    });
     // Set the allowed origins to the Amplify URL.
     // To add additional origins (e.g. custom domains), update the SSM parameter manually.
     // See Docs/DEPLOYMENT_GUIDE.md for instructions.

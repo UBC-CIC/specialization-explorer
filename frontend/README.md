@@ -1,10 +1,10 @@
 # Specialization Explorer Frontend
 
-React 19 + TypeScript app built with Vite, Tailwind CSS and shadcn/ui. The React Compiler is enabled through `babel-plugin-react-compiler` in `vite.config.ts`. In deployment the app is built and hosted by AWS Amplify (see the [Deployment Guide](../Docs/DEPLOYMENT_GUIDE.md)).
+React 19 + TypeScript app built with Vite, Tailwind CSS and shadcn/ui. The React Compiler is enabled through `babel-plugin-react-compiler` in `vite.config.ts`. In deployment the app is built by the `<STACK-PREFIX>-Amplify-FrontendPipeline` CodePipeline and hosted by AWS Amplify (see the [Deployment Guide](../Docs/DEPLOYMENT_GUIDE.md)).
 
 ## Environment variables
 
-Amplify sets these at build time from the CDK outputs. To run the app locally, put them in `frontend/.env.local` (do not commit it), using the values from the Amplify app's environment variables:
+The frontend pipeline sets these at build time from the Api stack. To run the app locally, put them in `frontend/.env.local` (do not commit it), using the values from the environment variables of the `<STACK-PREFIX>-Amplify-FrontendBuild` CodeBuild project:
 
 | Variable | Value |
 | --- | --- |
@@ -13,7 +13,7 @@ Amplify sets these at build time from the CDK outputs. To run the app locally, p
 | `VITE_COGNITO_USER_POOL_ID` | Cognito user pool ID |
 | `VITE_COGNITO_USER_POOL_CLIENT_ID` | Cognito app client ID |
 
-Amplify also sets `VITE_AWS_REGION` and `VITE_IDENTITY_POOL_ID`, which the current code does not read.
+The build also sets `VITE_AWS_REGION` and `VITE_IDENTITY_POOL_ID`, which the current code does not read.
 
 The API only answers origins listed in the `/<STACK-PREFIX>-Api/API/AllowedOrigins` SSM parameter, so `http://localhost:5173` must be in that list for local development (see "Adding Custom Allowed Origins" in the Deployment Guide).
 
