@@ -75,10 +75,12 @@ export class AmplifyStack extends cdk.Stack {
       ],
     });
 
+    // Client-side routes (paths without a file extension) get the app shell with a 200
+    // https://docs.aws.amazon.com/amplify/latest/userguide/redirect-rewrite-examples.html#redirects-for-single-page-web-apps-spa
     amplifyApp.addCustomRule({
-      source: "/<*>",
-      target: "\t/index.html",
-      status: RedirectStatus.NOT_FOUND_REWRITE,
+      source: "</^[^.]+$|\\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|woff2|ttf|map|json|webp)$)([^.]+$)/>",
+      target: "/index.html",
+      status: RedirectStatus.REWRITE,
     });
 
     const amplifyBranch = amplifyApp.addBranch(branch);
@@ -155,7 +157,12 @@ export class AmplifyStack extends cdk.Stack {
     buildProject.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["amplify:CreateDeployment", "amplify:StartDeployment", "amplify:GetJob"],
-        resources: [amplifyBranch.arn, `${amplifyBranch.arn}/jobs/*`],
+        // CreateDeployment is authorized against the branch's deployments path
+        resources: [
+          amplifyBranch.arn,
+          `${amplifyBranch.arn}/deployments/*`,
+          `${amplifyBranch.arn}/jobs/*`,
+        ],
       })
     );
 
